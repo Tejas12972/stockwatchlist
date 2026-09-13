@@ -31,6 +31,9 @@ __all__ = [
     "PayoffRequest",
     "PayoffResponse",
     "SnapshotResponse",
+    "ScreenHitOut",
+    "ScreenResponse",
+    "EarningsResponse",
 ]
 
 DISCLAIMER = "Not investment advice. Personal analytics only."
@@ -236,3 +239,45 @@ class SnapshotResponse(BaseModel):
         description="False means an existing day was refreshed in place, not duplicated."
     )
     errors: list[str]
+
+
+class ScreenHitOut(BaseModel):
+    """One flagged symbol. Descriptive — not a recommendation to trade."""
+
+    ticker: str
+    flags: list[str]
+    summary: str
+    iv_rank: float | None
+    current_iv: float | None
+    volume_today: int | None
+    volume_median: float | None
+    volume_multiple: float | None
+    open_interest_today: int | None
+    open_interest_median: float | None
+    days_to_earnings: int | None
+
+
+class ScreenResponse(BaseModel):
+    """`screened` is reported alongside `hits` on purpose.
+
+    An empty result set could otherwise mean "nothing was flagged" or "nothing
+    was checked", and those are very different. `notes` carries the symbols that
+    could not be screened and why.
+    """
+
+    screened: int
+    hits: list[ScreenHitOut]
+    notes: list[str]
+    thresholds: dict[str, float]
+    disclaimer: str = DISCLAIMER
+
+
+class EarningsResponse(BaseModel):
+    """`next_earnings` is null when unknown — which is not the same as "none"."""
+
+    ticker: str
+    next_earnings: date | None
+    days_away: int | None
+    known: bool = Field(
+        description="False means the source had no date, not that none is scheduled."
+    )

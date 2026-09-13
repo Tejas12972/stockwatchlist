@@ -1,7 +1,7 @@
 # Options & Markets Analytics
 
 [![CI](https://github.com/Tejas12972/stockwatchlist/actions/workflows/ci.yml/badge.svg)](https://github.com/Tejas12972/stockwatchlist/actions/workflows/ci.yml)
-[![coverage](https://img.shields.io/badge/analytics%20coverage-96%25-brightgreen)](#tests)
+[![coverage](https://img.shields.io/badge/analytics%20coverage-97%25-brightgreen)](#tests)
 [![python](https://img.shields.io/badge/python-3.11%20%7C%203.12-blue)](https://www.python.org/)
 [![license](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
@@ -57,7 +57,7 @@ rather than rendering a misleading zero.
 | M4 — tests + CI | done |
 | M5 — Next.js front end | done |
 | M6 — Docker + Linux deploy | images build in CI; **not yet deployed to a host** |
-| M7 — polish (earnings flag, screener, CSV export) | in progress |
+| M7 — polish (earnings flag, screener, CSV export) | done |
 
 ---
 
@@ -269,7 +269,7 @@ cannot be priced is information, so it is shown rather than dropped.
 
 ## Tests
 
-459 tests. **The suite runs with no network at all**, which is enforced rather
+509 tests. **The suite runs with no network at all**, which is enforced rather
 than intended: `pytest-socket` is configured with `--disable-socket`, so any
 accidental outbound call fails the test that made it. `tests/test_offline.py`
 asserts the block is actually in place, so the guarantee cannot rot quietly if
@@ -285,8 +285,8 @@ cd api
 
 | Module | Coverage |
 |---|---|
-| `analytics/` (pricing, IV, IV rank, payoff) | **96%** |
-| whole package | 94% |
+| `analytics/` (pricing, IV, IV rank, payoff, screener) | **97%** |
+| whole package | 93% |
 
 CI enforces ≥85% overall and ≥90% on `analytics/` — a gate, not a number typed
 into a README.
@@ -313,6 +313,42 @@ What the suite actually checks, beyond line coverage:
 - **The vendor's failure modes**, against a fake `yfinance`: throttling is
   retried and reported as retryable, a schema change fails fast, NaN becomes
   `None`, and a strike-less row is dropped.
+
+---
+
+## Screener and export
+
+```bash
+options-tool screen                    # flag watchlist symbols where something changed
+options-tool screen --earnings         # also check earnings proximity (live requests)
+options-tool export --out history.csv  # one row per stored day
+options-tool export AAPL --what contracts --out chains.csv
+```
+
+The screener runs entirely on stored history, so it never touches the vendor and
+cannot be throttled. It flags elevated or depressed IV rank, and volume or open
+interest well above its own trailing **median** — median rather than mean because
+option volume is spiky, and one expiry-week spike would drag a mean upward for
+weeks afterwards.
+
+It is descriptive. It narrows a watchlist; it does not rank opportunities or
+suggest positions. And it reports how many symbols it screened alongside the
+hits, because an empty result could otherwise mean "nothing was flagged" or
+"nothing could be checked" — two very different things:
+
+```
+$ options-tool screen
+screened 2 symbols · 0 flagged
+
+  note: AAPL: insufficient history (1/20 days)
+  note: SPY: insufficient history (1/20 days)
+  nothing flagged.
+```
+
+CSV exports leave missing values genuinely empty rather than zero — a blank cell
+reads as "not available" in any spreadsheet, while a `0` reads as a measurement.
+The daily export carries the risk-free rate and dividend yield in force for each
+row, so a stored IV remains interpretable by whoever opens the file later.
 
 ---
 
@@ -371,6 +407,24 @@ dividend payers and will bias their greeks.
 
 **Time to expiry is calendar time**, measured to the 16:00 New York close, not
 trading time. Weekend decay is therefore priced as if it were trading decay.
+
+---
+
+## What I would do differently
+
+**Black-Scholes is the wrong model for American options**, and I used it anyway
+because it is the one an interviewer will ask me to derive. A binomial or
+Bjerksund-Stensland model would price early exercise properly; the provider
+abstraction means swapping the pricer is contained, and it is the first thing I
+would add.
+
+**A constant dividend yield of zero is wrong for dividend payers.** Discrete
+dividends would be more work and materially more correct for the names where it
+matters — pre-ex-dividend calls especially.
+
+**SQLite will hold for years at this scale** — a handful of tickers, one snapshot
+a day — and I chose it deliberately over Postgres because zero operations beats
+scalability I do not need. It would need replacing for multiple users.
 
 ---
 

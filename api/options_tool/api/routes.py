@@ -17,18 +17,22 @@ from sqlalchemy.orm import Session
 from options_tool import __version__
 from options_tool.analytics.chain import build_chain_frame, summarise_chain
 from options_tool.analytics.payoff import Leg, LegKind, build_payoff_curve
+from options_tool.analytics.screener import screen
 from options_tool.api.deps import get_api_settings, get_market_provider, get_session
 from options_tool.api.errors import APIError
 from options_tool.api.schemas import (
     ChainResponse,
     ChainSummary,
     ContractOut,
+    EarningsResponse,
     HealthResponse,
     IVRankResponse,
     LegIn,
     PayoffRequest,
     PayoffResponse,
     QuoteResponse,
+    ScreenHitOut,
+    ScreenResponse,
     SnapshotResponse,
     WatchlistAddRequest,
     WatchlistItem,
@@ -41,6 +45,7 @@ from options_tool.db.queries import (
     iv_rank_for,
     list_watchlist,
     remove_from_watchlist,
+    screen_inputs,
 )
 from options_tool.db.snapshot import snapshot_ticker
 from options_tool.providers.base import MarketDataProvider
@@ -288,6 +293,69 @@ def post_snapshot(
         atm_iv_30d=result.atm_iv_30d,
         created=result.created,
         errors=result.errors,
+    )
+
+
+@router.get("/screen", response_model=ScreenResponse, tags=["analytics"])
+def get_screen(
+    session: SessionDep,
+    settings: SettingsDep,
+    high: Annotated[float, Query(ge=0, le=100)] = 70.0,
+    low: Annotated[float, Query(ge=0, le=100)] = 30.0,
+    multiple: Annotated[float, Query(gt=1)] = 2.0,
+) -> ScreenResponse:
+    """Flag watchlist symbols where something has changed.
+
+    Runs entirely on stored history, so it never touches the vendor and cannot
+    be throttled. Purely descriptive — it narrows a list, it does not rank
+    opportunities or suggest positions.
+    """
+    inputs = screen_inputs(
+        session, settings.options_iv_window_days, settings.options_min_history_days
+    )
+    hits = screen(inputs, high, low, multiple)
+
+    notes = [f"{item.ticker}: {item.iv_rank_reason}" for item in inputs if item.iv_rank is None]
+
+    return ScreenResponse(
+        screened=len(inputs),
+        hits=[
+            ScreenHitOut(
+                ticker=hit.ticker,
+                flags=[flag.value for flag in hit.flags],
+                summary=hit.summary,
+                iv_rank=hit.iv_rank,
+                current_iv=hit.current_iv,
+                volume_today=hit.volume_today,
+                volume_median=hit.volume_median,
+                volume_multiple=hit.volume_multiple,
+                open_interest_today=hit.open_interest_today,
+                open_interest_median=hit.open_interest_median,
+                days_to_earnings=hit.days_to_earnings,
+            )
+            for hit in hits
+        ],
+        notes=notes,
+        thresholds={"high_iv_rank": high, "low_iv_rank": low, "activity_multiple": multiple},
+    )
+
+
+@router.get("/earnings/{ticker}", response_model=EarningsResponse, tags=["market"])
+def get_earnings(ticker: str, provider: ProviderDep) -> EarningsResponse:
+    """Next scheduled earnings date, when the source has one.
+
+    Returns 200 with `known: false` rather than a 404 when the date is unknown.
+    No free source publishes reliable forward earnings dates for every symbol,
+    and "we do not know" is a different answer from "none is scheduled".
+    """
+    from datetime import UTC, datetime  # noqa: PLC0415
+
+    when = provider.get_next_earnings_date(ticker)
+    return EarningsResponse(
+        ticker=ticker.upper(),
+        next_earnings=when,
+        days_away=(when - datetime.now(UTC).date()).days if when else None,
+        known=when is not None,
     )
 
 

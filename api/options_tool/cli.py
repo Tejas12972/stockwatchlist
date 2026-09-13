@@ -12,7 +12,7 @@ from __future__ import annotations
 import argparse
 import logging
 import sys
-from datetime import date
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
 
@@ -85,6 +85,27 @@ def build_parser() -> argparse.ArgumentParser:
     p_ivrank = sub.add_parser("ivrank", help="IV rank from locally stored history")
     p_ivrank.add_argument("tickers", nargs="*", help="default: the whole watchlist")
 
+    p_screen = sub.add_parser("screen", help="flag watchlist symbols where something has changed")
+    p_screen.add_argument("--high", type=float, default=70.0, metavar="RANK")
+    p_screen.add_argument("--low", type=float, default=30.0, metavar="RANK")
+    p_screen.add_argument("--multiple", type=float, default=2.0, help="unusual-activity threshold")
+    p_screen.add_argument(
+        "--earnings",
+        action="store_true",
+        help="also check earnings dates (one live request per symbol)",
+    )
+    p_screen.add_argument("--csv", type=Path, default=None)
+
+    p_export = sub.add_parser("export", help="write stored history to CSV")
+    p_export.add_argument("tickers", nargs="*", help="default: the whole watchlist")
+    p_export.add_argument("--out", type=Path, required=True, help="output CSV path")
+    p_export.add_argument(
+        "--what",
+        choices=("daily", "contracts"),
+        default="daily",
+        help="daily = one row per stored day; contracts = every stored contract",
+    )
+
     p_capture = sub.add_parser(
         "capture-fixture", help="refresh the offline test/demo fixture from the live vendor"
     )
@@ -116,6 +137,8 @@ def main(argv: list[str] | None = None) -> int:
             "watchlist": _cmd_watchlist,
             "snapshot": _cmd_snapshot,
             "ivrank": _cmd_ivrank,
+            "screen": _cmd_screen,
+            "export": _cmd_export,
             "capture-fixture": _cmd_capture,
         }
         return handlers[args.command](args, provider)
@@ -376,6 +399,231 @@ def _cmd_ivrank(args: argparse.Namespace, provider: MarketDataProvider) -> int: 
             )
     print(f"\n{DISCLAIMER}")
     return 0
+
+
+def _cmd_screen(args: argparse.Namespace, provider: MarketDataProvider) -> int:
+    from options_tool.analytics.chain import time_to_expiry  # noqa: PLC0415
+    from options_tool.analytics.screener import screen  # noqa: PLC0415
+    from options_tool.config import get_settings  # noqa: PLC0415
+    from options_tool.db.queries import list_watchlist, screen_inputs  # noqa: PLC0415
+    from options_tool.db.session import init_db, session_scope  # noqa: PLC0415
+    from options_tool.providers.base import ProviderError  # noqa: PLC0415
+
+    settings = get_settings()
+    engine = init_db()
+
+    with session_scope(engine) as session:
+        symbols = [t.symbol for t in list_watchlist(session)]
+        if not symbols:
+            print("watchlist is empty — add one with: options-tool watchlist --add SPY")
+            return 0
+
+        earnings: dict[str, int] = {}
+        near_expiry: dict[str, int] = {}
+        if args.earnings:
+            today = datetime.now(UTC).date()
+            for symbol in symbols:
+                try:
+                    when = provider.get_next_earnings_date(symbol)
+                    expiries = provider.get_expiries(symbol)
+                except ProviderError as exc:
+                    # An optional flag must never cost you the screen itself.
+                    print(f"  warning: no earnings data for {symbol} ({exc})")
+                    continue
+                if when is not None:
+                    earnings[symbol] = (when - today).days
+                if expiries:
+                    near_expiry[symbol] = round(time_to_expiry(expiries[0]) * 365)
+
+        inputs = screen_inputs(
+            session,
+            settings.options_iv_window_days,
+            settings.options_min_history_days,
+            earnings,
+            near_expiry,
+        )
+        hits = screen(inputs, args.high, args.low, args.multiple)
+
+        # Symbols with nothing to report are still accounted for, so an empty
+        # screen cannot be confused with a screen that failed to run.
+        print(f"screened {len(inputs)} symbols · {len(hits)} flagged\n")
+        for note in {n for item in inputs for n in _input_notes(item)}:
+            print(f"  note: {note}")
+        if not hits:
+            print("  nothing flagged.")
+        for hit in hits:
+            rank = f"{hit.iv_rank:.0f}" if hit.iv_rank is not None else "n/a"
+            print(f"{hit.ticker:<8} IV rank {rank:>4}  {hit.summary}")
+            if hit.volume_multiple:
+                print(
+                    f"         volume {hit.volume_today:,} vs median "
+                    f"{hit.volume_median:,.0f} ({hit.volume_multiple:.1f}x)"
+                )
+            if hit.days_to_earnings is not None:
+                print(f"         earnings in {hit.days_to_earnings} days")
+
+        if args.csv:
+            _write_csv(
+                args.csv,
+                [
+                    "ticker",
+                    "flags",
+                    "iv_rank",
+                    "current_iv",
+                    "volume_today",
+                    "volume_median",
+                    "volume_multiple",
+                    "days_to_earnings",
+                ],
+                [
+                    [
+                        h.ticker,
+                        "|".join(f.value for f in h.flags),
+                        h.iv_rank,
+                        h.current_iv,
+                        h.volume_today,
+                        h.volume_median,
+                        h.volume_multiple,
+                        h.days_to_earnings,
+                    ]
+                    for h in hits
+                ],
+            )
+            print(f"\nwrote {args.csv}")
+
+    print(f"\n{DISCLAIMER}")
+    return 0
+
+
+def _input_notes(item: Any) -> list[str]:
+    """Baseline-not-ready notes, surfaced once rather than per symbol."""
+    notes: list[str] = []
+    if item.iv_rank is None:
+        notes.append(f"{item.ticker}: {item.iv_rank_reason}")
+    return notes
+
+
+def _cmd_export(args: argparse.Namespace, provider: MarketDataProvider) -> int:  # noqa: ARG001
+    from sqlalchemy import select  # noqa: PLC0415
+
+    from options_tool.db.models import Contract, Snapshot, Ticker  # noqa: PLC0415
+    from options_tool.db.queries import list_watchlist  # noqa: PLC0415
+    from options_tool.db.session import init_db, session_scope  # noqa: PLC0415
+
+    engine = init_db()
+    with session_scope(engine) as session:
+        symbols = args.tickers or [t.symbol for t in list_watchlist(session)]
+        if not symbols:
+            print("nothing to export — the watchlist is empty")
+            return 0
+        symbols = [s.upper() for s in symbols]
+
+        if args.what == "daily":
+            rows = session.execute(
+                select(
+                    Ticker.symbol,
+                    Snapshot.snapshot_date,
+                    Snapshot.spot,
+                    Snapshot.atm_iv_30d,
+                    Snapshot.atm_iv_front,
+                    Snapshot.contract_count,
+                    Snapshot.solved_count,
+                    Snapshot.risk_free_rate,
+                    Snapshot.dividend_yield,
+                    Snapshot.provider,
+                )
+                .join(Ticker, Snapshot.ticker_id == Ticker.id)
+                .where(Ticker.symbol.in_(symbols))
+                .order_by(Ticker.symbol, Snapshot.snapshot_date)
+            ).all()
+            header = [
+                "ticker",
+                "snapshot_date",
+                "spot",
+                "atm_iv_30d",
+                "atm_iv_front",
+                "contract_count",
+                "solved_count",
+                "risk_free_rate",
+                "dividend_yield",
+                "provider",
+            ]
+        else:
+            rows = session.execute(
+                select(
+                    Ticker.symbol,
+                    Snapshot.snapshot_date,
+                    Contract.expiry,
+                    Contract.strike,
+                    Contract.right,
+                    Contract.bid,
+                    Contract.ask,
+                    Contract.mid,
+                    Contract.last,
+                    Contract.volume,
+                    Contract.open_interest,
+                    Contract.iv,
+                    Contract.iv_status,
+                    Contract.delta,
+                    Contract.gamma,
+                    Contract.vega,
+                    Contract.theta,
+                    Contract.rho,
+                )
+                .join(Snapshot, Contract.snapshot_id == Snapshot.id)
+                .join(Ticker, Snapshot.ticker_id == Ticker.id)
+                .where(Ticker.symbol.in_(symbols))
+                .order_by(
+                    Ticker.symbol,
+                    Snapshot.snapshot_date,
+                    Contract.expiry,
+                    Contract.right,
+                    Contract.strike,
+                )
+            ).all()
+            header = [
+                "ticker",
+                "snapshot_date",
+                "expiry",
+                "strike",
+                "right",
+                "bid",
+                "ask",
+                "mid",
+                "last",
+                "volume",
+                "open_interest",
+                "iv",
+                "iv_status",
+                "delta",
+                "gamma",
+                "vega",
+                "theta",
+                "rho",
+            ]
+
+        _write_csv(args.out, header, [list(row) for row in rows])
+        print(f"wrote {len(rows)} rows to {args.out}")
+        # Said explicitly: the greeks in this file are ours, and re-importing it
+        # elsewhere carries our assumptions with it.
+        print("greeks and implied volatility in this file were computed by this tool.")
+    return 0
+
+
+def _write_csv(path: Path, header: list[str], rows: list[list[Any]]) -> None:
+    """Write a CSV, leaving missing values genuinely empty rather than 0.
+
+    An empty cell reads as "not available" in every spreadsheet; a 0 reads as a
+    measurement, which is the one thing it must not.
+    """
+    import csv  # noqa: PLC0415
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(header)
+        for row in rows:
+            writer.writerow(["" if value is None else value for value in row])
 
 
 def _cmd_capture(args: argparse.Namespace, provider: MarketDataProvider) -> int:

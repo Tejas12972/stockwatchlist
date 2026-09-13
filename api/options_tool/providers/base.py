@@ -129,6 +129,16 @@ class MarketDataProvider(ABC):
     def get_chain(self, ticker: str, expiry: date) -> OptionChain:
         """Full option chain for one `ticker` and `expiry`."""
 
+    def get_next_earnings_date(self, ticker: str) -> date | None:  # noqa: ARG002
+        """Next scheduled earnings date, or None if unknown.
+
+        Optional: the default says "unknown" rather than raising, because no
+        free source publishes reliable forward earnings dates for every symbol
+        and a provider that cannot supply one should not break the chain view.
+        Callers must treat None as "no information", never as "no earnings".
+        """
+        return None
+
     def resolve_expiry(self, ticker: str, expiry: date | None) -> date:
         """Pick an expiry: the one given, or the nearest listed one if None.
 

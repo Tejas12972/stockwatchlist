@@ -12,6 +12,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from options_tool.analytics.iv_rank import IVObservation, IVRankResult, compute_iv_rank
+from options_tool.analytics.screener import ScreenInput
 from options_tool.db.models import Contract, Snapshot, Ticker
 
 __all__ = [
@@ -23,6 +24,8 @@ __all__ = [
     "add_to_watchlist",
     "remove_from_watchlist",
     "contract_count",
+    "activity_history",
+    "screen_inputs",
 ]
 
 
@@ -133,3 +136,65 @@ def contract_count(session: Session, symbol: str | None = None) -> int:
             .where(Ticker.symbol == symbol.strip().upper())
         )
     return int(session.scalar(statement) or 0)
+
+
+def activity_history(session: Session, symbol: str, limit: int = 60) -> tuple[list[int], list[int]]:
+    """(volume, open interest) totals per stored day, oldest first.
+
+    Aggregated in SQL rather than pulled row by row: a year of snapshots for one
+    symbol is hundreds of thousands of contract rows, and the screener only ever
+    wants two numbers a day from them.
+    """
+    rows = session.execute(
+        select(
+            Snapshot.snapshot_date,
+            func.coalesce(func.sum(Contract.volume), 0),
+            func.coalesce(func.sum(Contract.open_interest), 0),
+        )
+        .join(Contract, Contract.snapshot_id == Snapshot.id)
+        .join(Ticker, Snapshot.ticker_id == Ticker.id)
+        .where(Ticker.symbol == symbol.strip().upper())
+        .group_by(Snapshot.snapshot_date)
+        .order_by(Snapshot.snapshot_date.desc())
+        .limit(limit)
+    ).all()
+
+    ordered = list(reversed(rows))
+    return [int(row[1]) for row in ordered], [int(row[2]) for row in ordered]
+
+
+def screen_inputs(
+    session: Session,
+    window_days: int = 252,
+    min_history_days: int = 20,
+    earnings: dict[str, int] | None = None,
+    days_to_near_expiry: dict[str, int] | None = None,
+) -> list[ScreenInput]:
+    """Assemble what the screener needs for every active watchlist symbol.
+
+    `earnings` and `days_to_near_expiry` are passed in rather than fetched here,
+    because they need the live provider and this module deliberately touches
+    only stored data.
+    """
+    inputs = []
+    for ticker in list_watchlist(session):
+        rank = iv_rank_for(session, ticker.symbol, window_days, min_history_days)
+        volume, open_interest = activity_history(session, ticker.symbol)
+
+        inputs.append(
+            ScreenInput(
+                ticker=ticker.symbol,
+                iv_rank=rank.rank,
+                iv_rank_reason=rank.reason,
+                current_iv=rank.current_iv,
+                # The last stored day is "today"; the rest is its own baseline,
+                # so today is excluded from the median it is compared against.
+                volume_today=volume[-1] if volume else None,
+                volume_history=volume[:-1],
+                open_interest_today=open_interest[-1] if open_interest else None,
+                open_interest_history=open_interest[:-1],
+                days_to_earnings=(earnings or {}).get(ticker.symbol),
+                days_to_near_expiry=(days_to_near_expiry or {}).get(ticker.symbol),
+            )
+        )
+    return inputs

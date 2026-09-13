@@ -330,3 +330,43 @@ class TestEndToEnd:
         assert item["stored_days"] == 1
         assert item["first_snapshot"] == item["last_snapshot"]
         assert date.fromisoformat(item["last_snapshot"])
+
+
+class TestScreenEndpoint:
+    def test_reports_how_many_were_screened(self, api_client: TestClient) -> None:
+        """`screened` distinguishes "nothing flagged" from "nothing checked"."""
+        api_client.post("/watchlist", json={"symbol": "AAPL"})
+        api_client.post("/snapshot/AAPL")
+
+        body = api_client.get("/screen").json()
+        assert body["screened"] == 1
+        assert body["hits"] == []
+        assert any("insufficient history" in note for note in body["notes"])
+
+    def test_thresholds_are_echoed_back(self, api_client: TestClient) -> None:
+        body = api_client.get("/screen", params={"high": 80, "low": 20}).json()
+        assert body["thresholds"]["high_iv_rank"] == 80
+        assert body["thresholds"]["low_iv_rank"] == 20
+
+    def test_invalid_thresholds_are_422(self, api_client: TestClient) -> None:
+        assert api_client.get("/screen", params={"high": 500}).status_code == 422
+        assert api_client.get("/screen", params={"multiple": 0.5}).status_code == 422
+
+    def test_carries_the_disclaimer(self, api_client: TestClient) -> None:
+        assert "Not investment advice" in api_client.get("/screen").json()["disclaimer"]
+
+    def test_empty_watchlist_screens_zero_without_erroring(self, api_client: TestClient) -> None:
+        body = api_client.get("/screen").json()
+        assert body["screened"] == 0
+        assert body["hits"] == []
+
+
+class TestEarningsEndpoint:
+    def test_unknown_is_200_with_known_false_not_a_404(self, api_client: TestClient) -> None:
+        """An unknown date is a different answer from no date being scheduled."""
+        response = api_client.get("/earnings/AAPL")
+        assert response.status_code == 200
+        body = response.json()
+        assert body["known"] is False
+        assert body["next_earnings"] is None
+        assert body["days_away"] is None

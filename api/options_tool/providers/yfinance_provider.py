@@ -156,6 +156,39 @@ class YFinanceProvider(MarketDataProvider):
             raise UnknownTickerError(f"{symbol}: Yahoo lists no option expiries")
         return tuple(sorted(date.fromisoformat(str(value)) for value in raw))
 
+    def get_next_earnings_date(self, ticker: str) -> date | None:
+        """Next earnings date from Yahoo's calendar, if it has one.
+
+        Wrapped broadly on purpose: this is a decorative flag on the chain view,
+        and Yahoo's calendar endpoint is the flakiest part of an already
+        unofficial source. Losing the flag is acceptable; losing the chain
+        because the flag failed is not.
+        """
+        symbol = ticker.upper()
+        try:
+            calendar = self._ticker(symbol).calendar
+        except Exception as exc:  # noqa: BLE001 -- an optional extra, never fatal
+            logger.info("no earnings calendar for %s: %s", symbol, exc)
+            return None
+
+        raw = None
+        if isinstance(calendar, dict):
+            raw = calendar.get("Earnings Date") or calendar.get("earningsDate")
+        if isinstance(raw, (list, tuple)):
+            raw = raw[0] if raw else None
+        if raw is None:
+            return None
+
+        try:
+            if isinstance(raw, date) and not isinstance(raw, datetime):
+                return raw
+            if isinstance(raw, datetime):
+                return raw.date()
+            return date.fromisoformat(str(raw)[:10])
+        except (ValueError, TypeError):
+            logger.info("unparseable earnings date for %s: %r", symbol, raw)
+            return None
+
     def get_chain(self, ticker: str, expiry: date) -> OptionChain:
         symbol = ticker.upper()
         chain = self._with_retries(
