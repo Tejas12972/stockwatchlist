@@ -7,6 +7,7 @@ lazy-import discipline in `yfinance_provider` keeps working.
 from __future__ import annotations
 
 from options_tool.providers.base import (
+    ExpiryNotFoundError,
     MarketDataProvider,
     OptionChain,
     OptionQuote,
@@ -17,6 +18,7 @@ from options_tool.providers.base import (
 )
 
 __all__ = [
+    "ExpiryNotFoundError",
     "MarketDataProvider",
     "OptionChain",
     "OptionQuote",

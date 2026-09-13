@@ -40,8 +40,8 @@ rather than rendering a misleading zero.
 |---|---|
 | M1 — core analytics (pricing, greeks, IV solver, chain normalisation, CLI) | done |
 | M2 — persistence + daily snapshots + IV rank | done |
-| M3 — FastAPI | in progress |
-| M4 — tests + CI | planned |
+| M3 — FastAPI | done |
+| M4 — tests + CI | in progress |
 | M5 — Next.js front end | planned |
 | M6 — Docker + Linux deploy | planned |
 | M7 — polish (earnings flag, screener, CSV export) | planned |
@@ -121,6 +121,42 @@ SPY      IV rank unavailable: insufficient history (1/20 days) (ATM IV 14.6%)
 └───────┴────────┴───────┴───────┴───────┴─────┴───────┴─────────┴─────────┴────────┴─────────┘
         6/6 strikes solved (100%) · greeks computed locally, not vendor-supplied
 ```
+
+### Run the API
+
+```bash
+cd api
+.venv/bin/uvicorn options_tool.api.main:app --reload
+```
+
+Interactive docs at <http://localhost:8000/docs>.
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /health` | liveness, plus whether the DB and provider are reachable |
+| `GET /watchlist`, `POST /watchlist`, `DELETE /watchlist/{ticker}` | tracked symbols |
+| `GET /quote/{ticker}` | spot |
+| `GET /chain/{ticker}` | full chain with self-computed greeks |
+| `GET /ivrank/{ticker}` | IV rank, or `null` plus a reason |
+| `POST /snapshot/{ticker}` | capture today's chains (idempotent) |
+| `POST /payoff` | multi-leg P/L at expiry **and** today |
+
+Errors are typed, never a bare 500. An unlisted expiry returns the ones that do
+exist so the client can correct itself in one round trip:
+
+```json
+{
+  "code": "expiry_not_found",
+  "message": "AAPL: no listed chain for expiry 1999-01-01. Available: 2026-09-14, 2027-01-15, 2028-12-15",
+  "detail": { "available_expiries": ["2026-09-14", "2027-01-15", "2028-12-15"] }
+}
+```
+
+`POST /payoff` solves each leg's implied volatility from the live chain when you
+do not supply one, and returns both curves. Extremes are computed analytically
+rather than read off the plotted grid, so `"max_loss": null` means genuinely
+unlimited — and a long put's profit is correctly reported as large but finite,
+because the underlying cannot fall below zero.
 
 ---
 

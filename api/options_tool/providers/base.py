@@ -21,6 +21,7 @@ __all__ = [
     "ProviderError",
     "RateLimitedError",
     "UnknownTickerError",
+    "ExpiryNotFoundError",
     "Quote",
     "OptionQuote",
     "OptionChain",
@@ -38,6 +39,19 @@ class RateLimitedError(ProviderError):
 
 class UnknownTickerError(ProviderError):
     """The vendor has no such symbol. A 404, not a 503."""
+
+
+class ExpiryNotFoundError(ProviderError):
+    """The symbol exists but is not listed for that expiry.
+
+    Separate from `ProviderError` because it is the *caller's* mistake, not an
+    upstream failure -- it deserves a 404 carrying the available expiries, not a
+    502 that implies the vendor is down.
+    """
+
+    def __init__(self, message: str, available: tuple[date, ...] = ()) -> None:
+        super().__init__(message)
+        self.available = available
 
 
 @dataclass(frozen=True, slots=True)
@@ -127,9 +141,10 @@ class MarketDataProvider(ABC):
         if expiry is None:
             return expiries[0]
         if expiry not in expiries:
-            available = ", ".join(str(e) for e in expiries[:8])
-            raise ProviderError(
-                f"{ticker}: no chain for expiry {expiry}. Available: {available}"
-                + (" ..." if len(expiries) > 8 else "")
+            shown = ", ".join(str(e) for e in expiries[:8])
+            raise ExpiryNotFoundError(
+                f"{ticker.upper()}: no listed chain for expiry {expiry}. "
+                f"Available: {shown}" + (" ..." if len(expiries) > 8 else ""),
+                available=expiries,
             )
         return expiry

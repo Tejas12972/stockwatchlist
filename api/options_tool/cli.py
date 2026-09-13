@@ -195,12 +195,12 @@ def _cmd_chain(args: argparse.Namespace, provider: MarketDataProvider) -> int:
     table = Table(
         title=(
             f"{chain.ticker} {expiry}  spot {chain.spot:,.2f}  "
-            f"T {summary['time_to_expiry']:.4f}y  r {rate:.2%}"
+            f"T {summary.time_to_expiry:.4f}y  r {rate:.2%}"
         ),
         caption=(
-            f"{summary['solved']}/{summary['contracts']} strikes solved "
-            f"({summary['solve_rate']:.0%})"
-            + (f" · ATM IV {summary['atm_iv']:.1%}" if summary["atm_iv"] else "")
+            f"{summary.solved}/{summary.contracts} strikes solved "
+            f"({summary.solve_rate:.0%})"
+            + (f" · ATM IV {summary.atm_iv:.1%}" if summary.atm_iv else "")
             + f" · greeks computed locally, not vendor-supplied · {DISCLAIMER}"
         ),
     )
@@ -248,8 +248,8 @@ def _cmd_chain(args: argparse.Namespace, provider: MarketDataProvider) -> int:
         )
 
     console.print(table)
-    if summary["unsolved_reasons"]:
-        console.print(f"[dim]unsolved: {summary['unsolved_reasons']}[/dim]")
+    if summary.unsolved_reasons:
+        console.print(f"[dim]unsolved: {summary.unsolved_reasons}[/dim]")
     if args.csv:
         console.print(f"[dim]wrote {args.csv}[/dim]")
     return 0

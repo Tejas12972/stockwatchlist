@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Any
 
 from options_tool.providers.base import (
+    ExpiryNotFoundError,
     MarketDataProvider,
     OptionChain,
     OptionQuote,
@@ -86,9 +87,11 @@ class FixtureProvider(MarketDataProvider):
         underlying = self._underlying(symbol)
         rows = underlying["chains"].get(expiry.isoformat())
         if rows is None:
-            available = ", ".join(sorted(underlying["chains"]))
-            raise UnknownTickerError(
-                f"{symbol}: fixture has no chain for {expiry}. Captured expiries: {available}"
+            captured = self.get_expiries(symbol)
+            raise ExpiryNotFoundError(
+                f"{symbol}: fixture has no chain for {expiry}. Captured expiries: "
+                + ", ".join(str(e) for e in captured),
+                available=captured,
             )
 
         quotes = tuple(

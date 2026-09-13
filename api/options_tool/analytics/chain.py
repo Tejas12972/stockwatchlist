@@ -8,6 +8,7 @@ here, is what keeps vendor quirks from leaking into three places.
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
 from zoneinfo import ZoneInfo
 
@@ -17,7 +18,13 @@ from options_tool.analytics.black_scholes import Right, greeks
 from options_tool.analytics.implied_vol import IVStatus, solve_implied_vol
 from options_tool.providers.base import OptionChain, OptionQuote
 
-__all__ = ["CHAIN_COLUMNS", "build_chain_frame", "time_to_expiry", "summarise_chain"]
+__all__ = [
+    "CHAIN_COLUMNS",
+    "ChainStats",
+    "build_chain_frame",
+    "time_to_expiry",
+    "summarise_chain",
+]
 
 # US equity options stop trading at 16:00 New York time on the expiry date.
 _MARKET_CLOSE = (16, 0)
@@ -184,8 +191,25 @@ def build_chain_frame(
     return frame
 
 
-def summarise_chain(frame: pd.DataFrame) -> dict[str, object]:
-    """Headline numbers for a chain, including how much of it failed to solve.
+@dataclass(frozen=True, slots=True)
+class ChainStats:
+    """Headline numbers for a chain, including how much of it failed to solve."""
+
+    ticker: str
+    expiry: date | None
+    spot: float
+    time_to_expiry: float
+    contracts: int
+    solved: int
+    solve_rate: float
+    atm_iv: float | None
+    total_volume: int
+    total_open_interest: int
+    unsolved_reasons: dict[str, int] = field(default_factory=dict)
+
+
+def summarise_chain(frame: pd.DataFrame) -> ChainStats:
+    """Reduce a chain frame to its headline numbers.
 
     The solve rate is reported on purpose. A chain where a third of the strikes
     have no implied vol is a chain you should not draw conclusions from, and
@@ -196,22 +220,23 @@ def summarise_chain(frame: pd.DataFrame) -> dict[str, object]:
     atm_iv = None
     if not atm.empty:
         # Nearest-to-the-money solved strike on each side, averaged: a cheap,
-        # transparent ATM vol. Not an interpolated surface -- and not claimed to be.
+        # transparent ATM vol. Not an interpolated surface -- and not claimed to
+        # be. `analytics.atm_iv` does the careful version for IV rank.
         atm["distance"] = (atm["moneyness"] - 1.0).abs()
         nearest = atm.sort_values("distance").groupby("right", observed=True).head(1)
         atm_iv = float(nearest["iv"].mean())
 
     failures = frame.loc[~solved, "iv_status"].value_counts().to_dict()
-    return {
-        "ticker": frame.attrs.get("ticker"),
-        "expiry": frame.attrs.get("expiry"),
-        "spot": frame.attrs.get("spot"),
-        "time_to_expiry": frame.attrs.get("time_to_expiry"),
-        "contracts": len(frame),
-        "solved": int(solved.sum()),
-        "solve_rate": float(solved.mean()) if len(frame) else 0.0,
-        "atm_iv": atm_iv,
-        "total_volume": int(frame["volume"].sum(skipna=True) or 0),
-        "total_open_interest": int(frame["open_interest"].sum(skipna=True) or 0),
-        "unsolved_reasons": {str(k): int(v) for k, v in failures.items()},
-    }
+    return ChainStats(
+        ticker=str(frame.attrs.get("ticker", "")),
+        expiry=frame.attrs.get("expiry"),
+        spot=float(frame.attrs.get("spot", 0.0)),
+        time_to_expiry=float(frame.attrs.get("time_to_expiry", 0.0)),
+        contracts=len(frame),
+        solved=int(solved.sum()),
+        solve_rate=float(solved.mean()) if len(frame) else 0.0,
+        atm_iv=atm_iv,
+        total_volume=int(frame["volume"].sum(skipna=True) or 0),
+        total_open_interest=int(frame["open_interest"].sum(skipna=True) or 0),
+        unsolved_reasons={str(k): int(v) for k, v in failures.items()},
+    )
