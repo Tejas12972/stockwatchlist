@@ -39,8 +39,8 @@ rather than rendering a misleading zero.
 | Milestone | State |
 |---|---|
 | M1 — core analytics (pricing, greeks, IV solver, chain normalisation, CLI) | done |
-| M2 — persistence + daily snapshots + IV rank | in progress |
-| M3 — FastAPI | planned |
+| M2 — persistence + daily snapshots + IV rank | done |
+| M3 — FastAPI | in progress |
 | M4 — tests + CI | planned |
 | M5 — Next.js front end | planned |
 | M6 — Docker + Linux deploy | planned |
@@ -78,6 +78,37 @@ cp ../.env.example ../.env     # optional; every setting has a working default
 .venv/bin/python -m options_tool quote SPY
 ```
 
+### Build the IV history
+
+```bash
+.venv/bin/python -m options_tool watchlist --add SPY AAPL
+.venv/bin/python -m options_tool snapshot     # run this daily
+.venv/bin/python -m options_tool ivrank
+```
+
+`snapshot` is idempotent — running it twice in one day refreshes that day's rows
+rather than appending a second copy:
+
+```
+$ options-tool snapshot
+AAPL 2026-09-13: captured 368 contracts across 3 expiries (94% solved), 30d ATM IV 26.7%
+SPY  2026-09-13: captured 754 contracts across 3 expiries (85% solved), 30d ATM IV 14.6%
+stored contract rows: 0 -> 1122
+
+$ options-tool snapshot
+AAPL 2026-09-13: refreshed 368 contracts across 3 expiries (94% solved), 30d ATM IV 26.7%
+SPY  2026-09-13: refreshed 754 contracts across 3 expiries (85% solved), 30d ATM IV 14.6%
+stored contract rows: 1122 -> 1122
+```
+
+On a fresh database IV rank says so rather than inventing a number:
+
+```
+$ options-tool ivrank
+AAPL     IV rank unavailable: insufficient history (1/20 days) (ATM IV 26.7%)
+SPY      IV rank unavailable: insufficient history (1/20 days) (ATM IV 14.6%)
+```
+
 ```
                        SPY 2026-09-14  spot 764.29  T 0.0050y  r 4.00%
 ┏━━━━━━━┳━━━━━━━━┳━━━━━━━┳━━━━━━━┳━━━━━━━┳━━━━━┳━━━━━━━┳━━━━━━━━━┳━━━━━━━━━┳━━━━━━━━┳━━━━━━━━━┓
@@ -90,6 +121,49 @@ cp ../.env.example ../.env     # optional; every setting has a working default
 └───────┴────────┴───────┴───────┴───────┴─────┴───────┴─────────┴─────────┴────────┴─────────┘
         6/6 strikes solved (100%) · greeks computed locally, not vendor-supplied
 ```
+
+---
+
+## How the IV history works
+
+This is the part of the project I find most interesting, because the data simply
+does not exist to be downloaded.
+
+IV rank needs a history of implied volatility. Free providers give you today's
+chain and nothing else, and the historical-IV products that do exist are paid.
+The two dishonest ways out are to substitute realised volatility (a different
+quantity that answers a different question) or to render a rank from three days
+of data and hope nobody asks. This tool does neither: it runs a daily job that
+captures the full chain, computes every contract's IV, and writes the lot to
+SQLite. The history is one the tool builds for itself, starting empty.
+
+**Reducing a day to one number.** IV rank needs a single scalar per day, and
+"the IV of some strike" will not do — as spot drifts, a fixed strike slides along
+the skew, and as days pass the front expiry rolls, so the series would move for
+reasons unrelated to volatility. Instead each day is reduced to a **30-day
+constant-maturity at-the-money IV**: interpolate to the at-the-money strike
+within each expiry, then interpolate across expiries *in total variance* to a
+30-day horizon. Variance rather than volatility because variance is what is
+additive in time. If 30 days cannot be bracketed by the listed expiries, the day
+stores `null` and is excluded — extrapolating would invent a number, and on an
+early day an invented number becomes the historical minimum for a year.
+
+**Idempotency is a database guarantee, not a convention.** Unique constraints on
+`(ticker_id, snapshot_date)` and `(snapshot_id, expiry, strike, right)` make the
+tuple `(ticker, date, expiry, strike, right)` unique by construction, and the
+writer uses `INSERT ... ON CONFLICT DO UPDATE`. A cron timer that fires twice, a
+retried half-failure, or a manual re-run all refresh the day instead of
+double-weighting it in the rank window.
+
+**Storing the assumptions with the data.** Each snapshot records the risk-free
+rate and dividend yield in force when it was captured. Without them a stored IV
+is uninterpretable later — you could not distinguish a real volatility move from
+a change to the tool's own configuration.
+
+**Rank and percentile, not just rank.** IV rank places today between the window's
+extremes; IV percentile reports the share of days below today. Percentile is the
+more robust of the two — a single outlier day sets the range that rank is
+measured against, but moves percentile by one observation. Both are reported.
 
 ---
 

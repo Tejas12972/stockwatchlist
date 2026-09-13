@@ -66,6 +66,25 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_chain.add_argument("--csv", type=Path, default=None, help="also write the frame to CSV")
 
+    p_watch = sub.add_parser("watchlist", help="show or edit the tracked symbols")
+    p_watch.add_argument("--add", nargs="+", metavar="TICKER", default=None)
+    p_watch.add_argument("--remove", nargs="+", metavar="TICKER", default=None)
+    p_watch.add_argument("--all", action="store_true", help="include removed symbols")
+
+    p_snapshot = sub.add_parser(
+        "snapshot",
+        help="capture today's chains into the local history (idempotent, safe to re-run)",
+    )
+    p_snapshot.add_argument(
+        "tickers", nargs="*", help="symbols to capture (default: the whole watchlist)"
+    )
+    p_snapshot.add_argument(
+        "--expiries", type=int, default=6, help="expiries to capture per ticker"
+    )
+
+    p_ivrank = sub.add_parser("ivrank", help="IV rank from locally stored history")
+    p_ivrank.add_argument("tickers", nargs="*", help="default: the whole watchlist")
+
     p_capture = sub.add_parser(
         "capture-fixture", help="refresh the offline test/demo fixture from the live vendor"
     )
@@ -88,10 +107,15 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         provider = get_provider(args.provider)
+        # Every handler takes (args, provider) so the dispatch stays uniform;
+        # the two that read only local history ignore the provider.
         handlers = {
             "quote": _cmd_quote,
             "expiries": _cmd_expiries,
             "chain": _cmd_chain,
+            "watchlist": _cmd_watchlist,
+            "snapshot": _cmd_snapshot,
+            "ivrank": _cmd_ivrank,
             "capture-fixture": _cmd_capture,
         }
         return handlers[args.command](args, provider)
@@ -228,6 +252,129 @@ def _cmd_chain(args: argparse.Namespace, provider: MarketDataProvider) -> int:
         console.print(f"[dim]unsolved: {summary['unsolved_reasons']}[/dim]")
     if args.csv:
         console.print(f"[dim]wrote {args.csv}[/dim]")
+    return 0
+
+
+def _cmd_watchlist(args: argparse.Namespace, provider: MarketDataProvider) -> int:  # noqa: ARG001
+    from options_tool.db.queries import (  # noqa: PLC0415
+        add_to_watchlist,
+        history_depth,
+        list_watchlist,
+        remove_from_watchlist,
+    )
+    from options_tool.db.session import init_db, session_scope  # noqa: PLC0415
+
+    engine = init_db()
+    with session_scope(engine) as session:
+        for symbol in args.add or []:
+            add_to_watchlist(session, symbol)
+            print(f"added {symbol.upper()}")
+        for symbol in args.remove or []:
+            removed = remove_from_watchlist(session, symbol)
+            print(f"removed {symbol.upper()}" if removed else f"{symbol.upper()} was not tracked")
+
+        tickers = list_watchlist(session, include_inactive=args.all)
+        if not tickers:
+            print("watchlist is empty — add one with: options-tool watchlist --add SPY")
+            return 0
+
+        print(f"{'symbol':<8} {'days':>5}  history")
+        for ticker in tickers:
+            days, first, last = history_depth(session, ticker.symbol)
+            span = f"{first} to {last}" if days else "no snapshots yet"
+            flag = "" if ticker.active else "  (removed)"
+            print(f"{ticker.symbol:<8} {days:>5}  {span}{flag}")
+    return 0
+
+
+def _cmd_snapshot(args: argparse.Namespace, provider: MarketDataProvider) -> int:
+    from options_tool.config import get_settings  # noqa: PLC0415
+    from options_tool.db.queries import contract_count  # noqa: PLC0415
+    from options_tool.db.session import init_db, session_scope  # noqa: PLC0415
+    from options_tool.db.snapshot import snapshot_ticker, snapshot_watchlist  # noqa: PLC0415
+    from options_tool.providers.rates import resolve_risk_free_rate  # noqa: PLC0415
+
+    settings = get_settings()
+    rate = resolve_risk_free_rate(settings)
+    engine = init_db()
+
+    with session_scope(engine) as session:
+        before = contract_count(session)
+        if args.tickers:
+            results = [
+                snapshot_ticker(
+                    session,
+                    provider,
+                    ticker,
+                    rate,
+                    settings.options_dividend_yield,
+                    args.expiries,
+                )
+                for ticker in args.tickers
+            ]
+        else:
+            results = snapshot_watchlist(
+                session, provider, rate, settings.options_dividend_yield, args.expiries
+            )
+            if not results:
+                print("watchlist is empty — add one with: options-tool watchlist --add SPY")
+                return 0
+
+        for result in results:
+            if result.errors and not result.contracts_written:
+                print(f"{result.ticker}: FAILED — {result.errors[0]}")
+                continue
+            atm = f"{result.atm_iv_30d:.1%}" if result.atm_iv_30d else "n/a"
+            verb = "captured" if result.created else "refreshed"
+            print(
+                f"{result.ticker} {result.snapshot_date}: {verb} "
+                f"{result.contracts_written} contracts across {len(result.expiries)} expiries "
+                f"({result.solve_rate:.0%} solved), 30d ATM IV {atm}"
+            )
+            for error in result.errors:
+                print(f"  warning: {error}")
+
+        after = contract_count(session)
+        print(f"stored contract rows: {before} -> {after}")
+    return 0
+
+
+def _cmd_ivrank(args: argparse.Namespace, provider: MarketDataProvider) -> int:  # noqa: ARG001
+    from options_tool.config import get_settings  # noqa: PLC0415
+    from options_tool.db.queries import iv_rank_for, list_watchlist  # noqa: PLC0415
+    from options_tool.db.session import init_db, session_scope  # noqa: PLC0415
+
+    settings = get_settings()
+    engine = init_db()
+
+    with session_scope(engine) as session:
+        symbols = args.tickers or [t.symbol for t in list_watchlist(session)]
+        if not symbols:
+            print("watchlist is empty — add one with: options-tool watchlist --add SPY")
+            return 0
+
+        for symbol in symbols:
+            result = iv_rank_for(
+                session,
+                symbol,
+                settings.options_iv_window_days,
+                settings.options_min_history_days,
+            )
+            if not result.ok:
+                # The degraded state is printed as prominently as a real answer.
+                # A blank or a zero here would read as "IV rank is low".
+                current = f" (ATM IV {result.current_iv:.1%})" if result.current_iv else ""
+                print(f"{symbol.upper():<8} IV rank unavailable: {result.reason}{current}")
+                continue
+            print(
+                f"{symbol.upper():<8} IV rank {result.rank:5.1f}   "
+                f"percentile {result.percentile:5.1f}   "
+                f"ATM IV {result.current_iv:.1%}   "
+                f"range {result.iv_min:.1%}-{result.iv_max:.1%}   "
+                f"({result.days_available} days, {result.first_observed} to "
+                f"{result.last_observed})"
+            )
+    print(f"\n{DISCLAIMER}")
     return 0
 
 
