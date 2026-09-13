@@ -146,6 +146,77 @@ jobs:
         env:
           NEXT_PUBLIC_API_BASE_URL: http://localhost:8000
 
+  # The development machine has no Docker, so the images would otherwise ship
+  # written but never built. Building them here is the difference between
+  # "syntax looks right" and "this actually compiles", and it keeps the deploy
+  # story honest: built in CI, not yet deployed to a host.
+  docker:
+    name: docker images build
+    needs: detect
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build the API image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.api
+          push: false
+          load: true
+          tags: options-analytics-api:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: The API image must serve a healthy /health
+        run: |
+          docker run -d --name api -p 8000:8000 \
+            -e OPTIONS_PROVIDER=fixture \
+            -e OPTIONS_DATABASE_URL=sqlite:////data/options.db \
+            options-analytics-api:ci
+          for _ in $(seq 1 30); do
+            if curl -fs localhost:8000/health > /dev/null; then break; fi
+            sleep 2
+          done
+          curl -fs localhost:8000/health | tee health.json
+          grep -q '"database_reachable":true' health.json
+          docker rm -f api
+
+      - name: The snapshot command must be idempotent inside the container
+        run: |
+          docker volume create ci-data
+          run_snapshot() {
+            docker run --rm -v ci-data:/data \
+              -e OPTIONS_PROVIDER=fixture \
+              -e OPTIONS_DATABASE_URL=sqlite:////data/options.db \
+              options-analytics-api:ci python -m options_tool snapshot AAPL
+          }
+          run_snapshot | tee first.txt
+          run_snapshot | tee second.txt
+          grep -q "captured" first.txt
+          grep -q "refreshed" second.txt
+          # The stored row count must be identical across the two runs.
+          test "$(grep -o '[0-9]\+ -> [0-9]\+' second.txt | awk '{print $1}')" \
+             = "$(grep -o '[0-9]\+ -> [0-9]\+' second.txt | awk '{print $3}')"
+
+      - name: Build the web image
+        if: needs.detect.outputs.web == 'true'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.web
+          push: false
+          load: true
+          tags: options-analytics-web:ci
+          build-args: NEXT_PUBLIC_API_BASE_URL=http://localhost:8000
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Validate the compose file
+        run: docker compose config --quiet
+
   secrets:
     name: no committed secrets
     runs-on: ubuntu-latest

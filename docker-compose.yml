@@ -1,0 +1,69 @@
+# Local and single-host deployment.
+#
+#   docker compose up --build
+#
+# The web image bakes NEXT_PUBLIC_API_BASE_URL into the client bundle at build
+# time, so behind nginx it must be the public URL the *browser* will call, not
+# the internal service name. That is the one thing about this file that catches
+# people out.
+
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    image: options-analytics-api
+    restart: unless-stopped
+    environment:
+      OPTIONS_PROVIDER: ${OPTIONS_PROVIDER:-yfinance}
+      OPTIONS_DATABASE_URL: sqlite:////data/options.db
+      OPTIONS_RISK_FREE_RATE: ${OPTIONS_RISK_FREE_RATE:-0.04}
+      OPTIONS_DIVIDEND_YIELD: ${OPTIONS_DIVIDEND_YIELD:-0.0}
+      OPTIONS_MIN_HISTORY_DAYS: ${OPTIONS_MIN_HISTORY_DAYS:-20}
+      OPTIONS_IV_WINDOW_DAYS: ${OPTIONS_IV_WINDOW_DAYS:-252}
+    volumes:
+      # The accumulated IV history is the one thing here that cannot be
+      # re-downloaded from anywhere. It lives in a named volume so `docker
+      # compose down` does not destroy it.
+      - options-data:/data
+    ports:
+      - "127.0.0.1:8000:8000"
+
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile.web
+      args:
+        NEXT_PUBLIC_API_BASE_URL: ${PUBLIC_API_URL:-http://localhost:8000}
+    image: options-analytics-web
+    restart: unless-stopped
+    depends_on:
+      api:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:3000:3000"
+
+  # The daily snapshot. Runs on the same image and the same volume as the API,
+  # so it shares one schema and one database with no coordination.
+  #
+  # Started only with `--profile snapshot`, because on a real host the systemd
+  # timer in deploy/ is the better scheduler: it survives reboots, logs to the
+  # journal, and will not silently stop when the container is recreated.
+  snapshot:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    image: options-analytics-api
+    profiles: ["snapshot"]
+    depends_on:
+      api:
+        condition: service_healthy
+    environment:
+      OPTIONS_PROVIDER: ${OPTIONS_PROVIDER:-yfinance}
+      OPTIONS_DATABASE_URL: sqlite:////data/options.db
+    volumes:
+      - options-data:/data
+    command: ["python", "-m", "options_tool", "snapshot"]
+
+volumes:
+  options-data:

@@ -56,8 +56,8 @@ rather than rendering a misleading zero.
 | M3 — FastAPI | done |
 | M4 — tests + CI | done |
 | M5 — Next.js front end | done |
-| M6 — Docker + Linux deploy | in progress |
-| M7 — polish (earnings flag, screener, CSV export) | planned |
+| M6 — Docker + Linux deploy | images build in CI; **not yet deployed to a host** |
+| M7 — polish (earnings flag, screener, CSV export) | in progress |
 
 ---
 
@@ -313,6 +313,32 @@ What the suite actually checks, beyond line coverage:
 - **The vendor's failure modes**, against a fake `yfinance`: throttling is
   retried and reported as retryable, a schema change fails fast, NaN becomes
   `None`, and a strike-less row is dropped.
+
+---
+
+## Deployment
+
+```bash
+cp .env.example .env      # set PUBLIC_API_URL to the URL the browser will call
+docker compose up --build
+```
+
+Multi-stage images for both services (non-root users, health checks, Next.js
+standalone output), an nginx config with TLS and rate limiting, and a systemd
+timer for the daily snapshot. Full walkthrough in
+[`deploy/README.md`](deploy/README.md).
+
+**I have not deployed this to a server.** The images are built and smoke-tested
+in CI — the API container must answer `/health` with a reachable database, and
+the snapshot command must report `refreshed` on its second run inside the
+container with an unchanged row count — but no host is running them. I would
+rather say that than imply a deployment I cannot point at.
+
+The timer runs weekdays at 21:15 UTC, after the US close in both EST and EDT, so
+the chain captured is the settled one rather than a mid-session reading whose
+volatility depends on what time the job happened to run. `Persistent=true` is set
+because a missed day is a permanent hole: historical implied volatility is not
+purchasable from any free source and cannot be backfilled.
 
 ---
 
