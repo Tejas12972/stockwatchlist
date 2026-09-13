@@ -41,6 +41,20 @@ No local Docker required — Fly builds the images remotely.
 
 ---
 
+## The short version
+
+```bash
+fly auth login
+./deploy/fly-bootstrap.sh
+```
+
+Idempotent — safe to re-run after a partial failure. It creates both apps, the
+volume and the login secret, deploys API-then-web in that order, seeds the
+watchlist, and prints the generated password once. The steps below are what it
+does, for when something needs doing by hand.
+
+---
+
 ## 1. Create the apps
 
 ```bash
