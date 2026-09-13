@@ -110,7 +110,11 @@ ignore = [
 "options_tool/analytics/implied_vol.py" = ["PLR0911"]
 
 [tool.mypy]
-python_version = "3.11"
+# Deliberately not pinned to a python_version. The CI matrix runs 3.11 and 3.12,
+# and pinning to 3.11 made mypy reject numpy's own 3.12 stubs, which use PEP 695
+# `type` statements: "Type statement is only supported in Python 3.12 and
+# greater". Letting mypy follow the interpreter it is running under checks each
+# matrix entry against the stubs actually installed for it.
 warn_unused_configs = true
 warn_redundant_casts = true
 warn_unused_ignores = true
