@@ -47,9 +47,12 @@ ENV OPTIONS_DATABASE_URL=sqlite:////data/options.db
 VOLUME ["/data"]
 EXPOSE 8000
 
-# The API reports database and provider reachability, so the container is marked
-# unhealthy when it is up but cannot actually serve, not merely when it is dead.
-HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-    CMD python -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=4).status == 200 else 1)"
+# Checks /live, not /health. A container health check answers "should this be
+# restarted", and restarting cannot fix an unreachable database -- pointing it
+# at the readiness endpoint would turn a degraded service into a crash loop.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+    CMD python -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/live', timeout=4).status == 200 else 1)"
 
+# Overridden in fly.api.toml to bind :: instead, because Fly's private network
+# is IPv6-only.
 CMD ["uvicorn", "options_tool.api.main:app", "--host", "0.0.0.0", "--port", "8000"]

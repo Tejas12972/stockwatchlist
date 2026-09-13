@@ -12,8 +12,17 @@
  *    component can distinguish a throttled vendor from a bad ticker.
  */
 
-export const API_BASE_URL =
-  process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
+/**
+ * Same-origin. Requests go to this app's own `/api/[...path]` route, which
+ * forwards them to the analytics API server-side.
+ *
+ * This used to be `process.env.NEXT_PUBLIC_API_BASE_URL`, compiled into the
+ * client bundle at build time — which meant the image only worked against the
+ * host it was built for, and moving the API required a rebuild. Proxying makes
+ * the upstream address runtime configuration (`API_INTERNAL_URL`, read by the
+ * route handler) and lets the API stay off the public internet entirely.
+ */
+export const API_BASE_URL = "/api";
 
 export interface ErrorBody {
   code: string;
@@ -49,13 +58,16 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
       cache: "no-store",
     });
   } catch {
-    // The API not being up at all is the most common failure in development,
-    // and "Failed to fetch" tells the user nothing actionable, so the original
-    // cause is deliberately replaced with something a reader can act on.
+    // This now means the *proxy route* is unreachable, which in practice means
+    // the Next.js server itself is down — the upstream API failing is returned
+    // by the route handler as a normal 502/504 with a typed body, not as a
+    // thrown fetch error. "Failed to fetch" tells a user nothing actionable, so
+    // the original cause is deliberately replaced.
     throw new ApiError(
       {
         code: "api_unreachable",
-        message: `Could not reach the API at ${API_BASE_URL}. Is it running? Try: cd api && uvicorn options_tool.api.main:app --reload`,
+        message:
+          "Could not reach the application server. If you are running locally, check that `npm run dev` is still running.",
       },
       0,
     );

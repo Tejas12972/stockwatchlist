@@ -69,6 +69,11 @@ def settings(tmp_path: Path) -> Iterator[Settings]:
             "OPTIONS_MIN_HISTORY_DAYS": "20",
             "OPTIONS_IV_WINDOW_DAYS": "252",
             "OPTIONS_FETCH_RISK_FREE_RATE": "false",
+            # Tests build the schema directly with `Base.metadata.create_all`,
+            # so the startup migration has nothing to do and would only race it.
+            "OPTIONS_RUN_MIGRATIONS_ON_STARTUP": "false",
+            # Never let a test process fire live vendor requests on a timer.
+            "OPTIONS_SNAPSHOT_ENABLED": "false",
         }
     )
     get_settings.cache_clear()

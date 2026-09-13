@@ -98,9 +98,11 @@ ignore = [
 #     genuinely unused by name.
 #   PLC0415 -- importing inside a test keeps the import under the assertion that
 #     depends on it, and lets a test prove something about import behaviour.
+#   ARG005 -- a monkeypatch stand-in must match the signature it replaces, so
+#     its unused parameters are required, not accidental.
 #   RUF012 -- parametrisation tables held as plain class attributes read far
 #     better than ClassVar-annotated ones.
-"tests/*" = ["ARG001", "ARG002", "PLC0415", "RUF012"]
+"tests/*" = ["ARG001", "ARG002", "ARG005", "PLC0415", "RUF012"]
 # Alembic writes these; hand-wrapping them only loses the next autogenerate.
 "alembic/versions/*" = ["E501"]
 "alembic/env.py" = ["ERA001"]

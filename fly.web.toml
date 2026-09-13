@@ -1,0 +1,48 @@
+# Fly config for the Next.js front end — the only publicly reachable surface.
+#
+#   fly deploy -c fly.web.toml
+#
+# Everything behind HTTP Basic auth (middleware.ts). Credentials are set as Fly
+# secrets, never committed:
+#
+#   fly secrets set APP_USERNAME=... APP_PASSWORD=... -a options-analytics-web
+
+app = "options-analytics-web"
+primary_region = "bos"
+
+[build]
+  dockerfile = "Dockerfile.web"
+
+[env]
+  # Resolved at request time by app/api/[...path]/route.ts, not baked into the
+  # client bundle — so this image is identical across environments and moving
+  # the API does not require a rebuild.
+  API_INTERNAL_URL = "http://options-analytics-api.internal:8000"
+  NODE_ENV = "production"
+
+[http_service]
+  internal_port = 3000
+  force_https = true
+  auto_stop_machines = "suspend"
+  auto_start_machines = true
+  # Suspending the front end is fine: it holds no state and no schedule, and a
+  # resume is fast. Only the API must stay up, because it owns the timer.
+  min_machines_running = 0
+
+  [http_service.concurrency]
+    type = "requests"
+    soft_limit = 50
+    hard_limit = 100
+
+  [[http_service.checks]]
+    grace_period = "15s"
+    interval = "30s"
+    method = "GET"
+    timeout = "5s"
+    # Unauthenticated on purpose so the platform health check is not a reason to
+    # weaken the auth middleware. It returns a fixed string and reads nothing.
+    path = "/healthz"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "512mb"

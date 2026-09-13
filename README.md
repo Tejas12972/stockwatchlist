@@ -56,7 +56,7 @@ rather than rendering a misleading zero.
 | M3 — FastAPI | done |
 | M4 — tests + CI | done |
 | M5 — Next.js front end | done |
-| M6 — Docker + Linux deploy | images build in CI; **not yet deployed to a host** |
+| M6 — Docker + deployment | Fly.io, private API + authenticated front end |
 | M7 — polish (earnings flag, screener, CSV export) | done |
 
 ---
@@ -269,7 +269,7 @@ cannot be priced is information, so it is shown rather than dropped.
 
 ## Tests
 
-509 tests. **The suite runs with no network at all**, which is enforced rather
+547 Python tests and 48 TypeScript tests. **The Python suite runs with no network at all**, which is enforced rather
 than intended: `pytest-socket` is configured with `--disable-socket`, so any
 accidental outbound call fails the test that made it. `tests/test_offline.py`
 asserts the block is actually in place, so the guarantee cannot rot quietly if
@@ -354,27 +354,60 @@ row, so a stored IV remains interpretable by whoever opens the file later.
 
 ## Deployment
 
-```bash
-cp .env.example .env      # set PUBLIC_API_URL to the URL the browser will call
-docker compose up --build
+Two Fly.io apps. **The API has no public address at all** — it is reachable only
+over Fly's private network, from the web app, which is the single authenticated
+surface.
+
+```
+  internet ──TLS──▶  web   (HTTP Basic auth, Next.js)
+                      │
+                      │ server-side proxy, private network
+                      ▼
+                     api   (FastAPI — no public address)
+                      │
+                      ▼
+              volume: /data/options.db
 ```
 
-Multi-stage images for both services (non-root users, health checks, Next.js
-standalone output), an nginx config with TLS and rate limiting, and a systemd
-timer for the daily snapshot. Full walkthrough in
-[`deploy/README.md`](deploy/README.md).
+That shape was chosen over the obvious one (expose the API, add a token) because
+it removes three problems rather than managing them:
 
-**I have not deployed this to a server.** The images are built and smoke-tested
-in CI — the API container must answer `/health` with a reachable database, and
-the snapshot command must report `refreshed` on its second run inside the
-container with an unchanged row count — but no host is running them. I would
-rather say that than imply a deployment I cannot point at.
+- **One auth check covers everything.** The browser can only reach the API via
+  `/api/*` on the web app, behind the same middleware as every other route.
+  There is no second, weaker door.
+- **CORS stops existing.** Same origin, no preflight, no allow-list to keep in
+  sync with the deployed domain.
+- **The API address becomes runtime config.** It used to be compiled into the
+  client bundle, so the image only worked against the host it was built for.
 
-The timer runs weekdays at 21:15 UTC, after the US close in both EST and EDT, so
-the chain captured is the settled one rather than a mid-session reading whose
-volatility depends on what time the job happened to run. `Persistent=true` is set
-because a missed day is a permanent hole: historical implied volatility is not
-purchasable from any free source and cannot be backfilled.
+```bash
+curl -L https://fly.io/install.sh | sh
+fly auth login
+fly volumes create options_data --size 1 -a options-analytics-api
+fly secrets set APP_USERNAME=you APP_PASSWORD="$(openssl rand -base64 24)" -a options-analytics-web
+fly deploy -c fly.api.toml && fly deploy -c fly.web.toml
+```
+
+Full walkthrough, including backups and troubleshooting, in
+[`deploy/README.md`](deploy/README.md). `docker-compose.yml` mirrors the same
+topology for a plain VPS.
+
+### The daily snapshot runs inside the API process
+
+Not a cron container, not a scheduled machine — a Fly volume attaches to exactly
+one machine at a time, and the snapshot writes to the same SQLite file the API
+reads. A separate scheduler could not open it.
+
+It fires weekdays at 21:15 UTC, after the US close in both EST and EDT, so the
+captured chain is the settled one rather than a mid-session reading whose
+volatility depends on what time the job happened to run. **On start it catches
+up**: if the machine was down through the scheduled time and today has no
+snapshot, it runs immediately. A missed day is a permanent hole — historical
+implied volatility cannot be bought from a free source or backfilled.
+
+This is a deliberate trade-off, not a default. A single machine with a single
+file database can schedule its own work; anything multi-instance could not,
+because every replica would fire the same job.
 
 ---
 

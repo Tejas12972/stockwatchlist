@@ -40,10 +40,17 @@ DISCLAIMER = "Not investment advice. Personal analytics only."
 
 
 class HealthResponse(BaseModel):
-    status: Literal["ok"]
+    status: Literal["ok", "degraded"]
     version: str
     provider: str
     database_reachable: bool
+    snapshot_scheduler: bool = Field(
+        default=False,
+        description="Whether this instance is running the daily snapshot itself.",
+    )
+    snapshot_at: str | None = Field(
+        default=None, description="Scheduled snapshot time in UTC, when enabled."
+    )
 
 
 class QuoteResponse(BaseModel):

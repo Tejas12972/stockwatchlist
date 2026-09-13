@@ -72,12 +72,64 @@ class Settings(BaseSettings):
     # --- Storage -------------------------------------------------------------
     options_database_url: str = Field(default="sqlite:///./data/options.db")
 
+    # --- Daily snapshot (deployed runs) --------------------------------------
+    options_snapshot_enabled: bool = Field(
+        default=False,
+        description=(
+            "Run the daily snapshot inside the API process. Off by default so "
+            "local development and tests never fire live vendor requests."
+        ),
+    )
+    options_snapshot_at: str = Field(
+        default="21:15",
+        description=(
+            "24h UTC time for the daily snapshot. 21:15 UTC is after the US "
+            "equity close in both EST and EDT."
+        ),
+    )
+
+    # --- Operations ----------------------------------------------------------
+    options_cors_origins: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Browser origins allowed to call this API directly. Empty in the "
+            "deployed arrangement, where the front end proxies server-side and "
+            "no cross-origin request is ever made."
+        ),
+    )
+    options_log_format: str = Field(
+        default="text", description="'text' for local readability, 'json' for a log pipeline."
+    )
+    options_run_migrations_on_startup: bool = Field(
+        default=True,
+        description="Apply Alembic migrations when the API starts. Safe and idempotent.",
+    )
+
     @field_validator("options_provider")
     @classmethod
     def _known_provider(cls, value: str) -> str:
         normalised = value.strip().lower()
         if normalised not in {"yfinance", "fixture"}:
             raise ValueError(f"unknown provider {value!r}; expected 'yfinance' or 'fixture'")
+        return normalised
+
+    @field_validator("options_snapshot_at")
+    @classmethod
+    def _valid_schedule_time(cls, value: str) -> str:
+        # Validated here rather than at first fire: a typo should stop the
+        # process at startup, not silently skip the snapshot for weeks.
+        # Imported inside the validator because scheduler imports config.
+        from options_tool.scheduler import parse_schedule_time  # noqa: PLC0415
+
+        parse_schedule_time(value)
+        return value.strip()
+
+    @field_validator("options_log_format")
+    @classmethod
+    def _known_log_format(cls, value: str) -> str:
+        normalised = value.strip().lower()
+        if normalised not in {"text", "json"}:
+            raise ValueError(f"unknown log format {value!r}; expected 'text' or 'json'")
         return normalised
 
     @field_validator("options_min_history_days")

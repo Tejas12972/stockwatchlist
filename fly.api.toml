@@ -1,0 +1,60 @@
+# Fly config for the analytics API.
+#
+#   fly deploy -c fly.api.toml
+#
+# Deliberately has no [http_service] and no public ports. The machine still gets
+# a private 6PN address, so the web app reaches it at
+# options-analytics-api.internal — but nothing on the internet can. That is what
+# makes the single Basic-auth check in the web app the complete authentication
+# story rather than one layer of two.
+
+app = "options-analytics-api"
+primary_region = "bos"          # Boston — nearest to me, and to US market data
+
+[build]
+  dockerfile = "Dockerfile.api"
+
+[env]
+  OPTIONS_PROVIDER = "yfinance"
+  OPTIONS_DATABASE_URL = "sqlite:////data/options.db"
+  OPTIONS_LOG_FORMAT = "json"
+  OPTIONS_RUN_MIGRATIONS_ON_STARTUP = "true"
+
+  # The daily snapshot runs inside this process. A Fly volume attaches to one
+  # machine at a time, so a separate scheduled machine could not open the same
+  # database while this one held it.
+  OPTIONS_SNAPSHOT_ENABLED = "true"
+  OPTIONS_SNAPSHOT_AT = "21:15"   # UTC — after the US close in both EST and EDT
+
+  OPTIONS_MIN_HISTORY_DAYS = "20"
+  OPTIONS_IV_WINDOW_DAYS = "252"
+
+[processes]
+  # Bound to :: rather than 0.0.0.0 because Fly's private network is IPv6.
+  app = "uvicorn options_tool.api.main:app --host :: --port 8000"
+
+[[mounts]]
+  source = "options_data"
+  destination = "/data"
+  # The accumulated IV history is the only irreplaceable state in this project.
+  # It cannot be re-downloaded from any free source, at any price.
+  snapshot_retention = 30
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "512mb"              # pandas + numpy need more than the 256mb default
+
+# No auto_stop. The scheduler lives in this process, so a machine that suspends
+# overnight would miss the snapshot — and a missed day is a permanent hole.
+[[services]]
+  internal_port = 8000
+  protocol = "tcp"
+  auto_stop_machines = false
+  auto_start_machines = false
+  min_machines_running = 1
+  # No `ports` block: reachable over 6PN only, never from the internet.
+
+  [[services.tcp_checks]]
+    interval = "30s"
+    timeout = "5s"
+    grace_period = "20s"

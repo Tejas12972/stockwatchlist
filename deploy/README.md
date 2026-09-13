@@ -1,144 +1,212 @@
 # Deploying
 
-Single host, Docker Compose behind nginx, with a systemd timer running the daily
-snapshot.
+Two Fly.io apps. **The API has no public address** — it is reachable only over
+Fly's private network, from the web app, which is the single authenticated
+surface.
 
-> **Status: written, not yet run.** These files were authored and checked for
-> syntax, but they have not been built or deployed — the development machine has
-> no Docker installed and there is no target host. Until someone runs the steps
-> below successfully, nothing in this repository claims a live deployment. If you
-> are that someone and a step is wrong, the fix belongs in this file.
-
-## What runs where
-
-| Piece | Where | Why |
-|---|---|---|
-| `api` | container, bound to `127.0.0.1:8000` | not exposed directly; nginx terminates TLS |
-| `web` | container, bound to `127.0.0.1:3000` | same |
-| `options-data` | named Docker volume | the accumulated IV history — the only irreplaceable state here |
-| snapshot | systemd timer, `docker compose run --rm` | survives reboots and logs to the journal |
-
-## 1. Host setup
-
-Tested target: Ubuntu 24.04 LTS, 1 vCPU / 1 GB. SQLite and a handful of chains
-need very little.
-
-```bash
-sudo apt update && sudo apt install -y docker.io docker-compose-v2 nginx certbot python3-certbot-nginx
-sudo systemctl enable --now docker
-sudo usermod -aG docker "$USER"   # log out and back in
+```
+  internet ──TLS──▶  options-analytics-web   (Basic auth, Next.js)
+                              │
+                              │ server-side proxy, Fly 6PN private network
+                              ▼
+                     options-analytics-api   (FastAPI, no public address)
+                              │
+                              ▼
+                      volume: /data/options.db
+                      (the IV history — the only irreplaceable state)
 ```
 
-## 2. Get the code
+Three consequences worth understanding before changing anything:
+
+- **One auth check covers everything.** The browser can only reach the API
+  through `/api/*` on the web app, which is behind the same middleware as every
+  other route. There is no second, weaker door to leave open.
+- **CORS does not apply.** Same origin, no preflight, no allow-list to keep in
+  sync with whatever domain this ends up on.
+- **The API address is runtime configuration.** `API_INTERNAL_URL` is read per
+  request, so the image is identical in every environment and moving the API
+  does not mean rebuilding the front end.
+
+---
+
+## Prerequisites
 
 ```bash
-sudo mkdir -p /opt/options-analytics
-sudo chown "$USER":"$USER" /opt/options-analytics
-git clone https://github.com/Tejas12972/stockwatchlist.git /opt/options-analytics
-cd /opt/options-analytics
+curl -L https://fly.io/install.sh | sh
+export PATH="$HOME/.fly/bin:$PATH"
+fly auth login          # opens a browser
 ```
 
-## 3. Configure
+No local Docker required — Fly builds the images remotely.
+
+---
+
+## 1. Create the apps
 
 ```bash
-cp .env.example .env
+fly apps create options-analytics-api
+fly apps create options-analytics-web
 ```
 
-Set `PUBLIC_API_URL` to the URL **the browser** will call — that is
-`https://your-domain/api`, not `http://api:8000`. The Next.js client bundle bakes
-this in at build time, so changing it later means rebuilding the web image, not
-just restarting it. This is the single most common way to get a working deploy
-that shows an empty page.
-
-## 4. Build and start
+## 2. Create the volume
 
 ```bash
-docker compose build
-docker compose up -d
-docker compose ps          # both services should be healthy
-curl -s localhost:8000/health
+fly volumes create options_data --size 1 --region bos -a options-analytics-api
 ```
 
-## 5. nginx and TLS
+1 GB is generous: a year of daily snapshots for a handful of tickers is tens of
+megabytes. Size it up later with `fly volumes extend`.
+
+> A Fly volume attaches to **exactly one machine**. That is why the daily
+> snapshot runs inside the API process rather than as a separate scheduled
+> machine — a second machine could not open the database while the API held it.
+> See `api/options_tool/scheduler.py`.
+
+## 3. Set the login
 
 ```bash
-sudo cp deploy/nginx.conf /etc/nginx/sites-available/options-analytics
-sudo sed -i "s/options.example.com/YOUR-DOMAIN/g" /etc/nginx/sites-available/options-analytics
-sudo ln -sf /etc/nginx/sites-available/options-analytics /etc/nginx/sites-enabled/
-sudo rm -f /etc/nginx/sites-enabled/default
-
-sudo nginx -t                       # must pass before reloading
-sudo systemctl reload nginx
-sudo certbot --nginx -d YOUR-DOMAIN
+fly secrets set \
+  APP_USERNAME='you' \
+  APP_PASSWORD="$(openssl rand -base64 24)" \
+  -a options-analytics-web
 ```
 
-`certbot` rewrites the TLS certificate paths in place, so run it after copying
-the config, not before.
+Print the generated password *before* you set it if you want to keep it —
+`fly secrets` is write-only and will not show it back to you.
 
-## 6. The daily snapshot
+**If these are unset the app runs open.** That is the right default for
+`npm run dev` on localhost and the wrong one on the internet, so `/health` on
+the API reports which mode is in force.
+
+## 4. Deploy
+
+The API first — the web app's health check depends on it being resolvable.
 
 ```bash
-sudo cp deploy/options-snapshot.service deploy/options-snapshot.timer /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable --now options-snapshot.timer
-
-systemctl list-timers options-snapshot.timer
-sudo systemctl start options-snapshot.service   # run once now
-journalctl -u options-snapshot.service -n 50 --no-pager
+fly deploy -c fly.api.toml
+fly deploy -c fly.web.toml
 ```
 
-The timer fires weekdays at 21:15 UTC — after the US close in both EST and EDT,
-so the captured chain is the settled one rather than a mid-session reading whose
-volatility depends on what time the job happened to run.
+## 5. Seed the watchlist
 
-`Persistent=true` matters more than it looks: if the host is down at the
-scheduled time the run happens at next boot instead of being skipped. **A missed
-day is a permanent hole in the IV history** — historical implied volatility is
-not purchasable from any free source, so it cannot be backfilled.
-
-## 7. Verify
+The daily job snapshots whatever is on the watchlist, so it needs at least one
+symbol before it does anything.
 
 ```bash
-# Idempotency: the second run must not add rows.
-sudo systemctl start options-snapshot.service
-docker compose run --rm snapshot | tail -2   # expect "refreshed", not "captured"
-
-# Migrations are applied with the API stopped, against the same volume.
-docker compose run --rm api alembic upgrade head
+fly ssh console -a options-analytics-api -C "python -m options_tool watchlist --add SPY AAPL"
+fly ssh console -a options-analytics-api -C "python -m options_tool snapshot"
 ```
+
+You can also add symbols through the UI once it is up.
+
+## 6. Verify
+
+```bash
+fly status -a options-analytics-api
+fly status -a options-analytics-web
+
+# The API must NOT be reachable from the internet. This should fail to resolve.
+curl -sS https://options-analytics-api.fly.dev/health || echo "correctly unreachable"
+
+# The web app must challenge for credentials.
+curl -s -o /dev/null -w '%{http_code}\n' https://options-analytics-web.fly.dev/        # 401
+curl -s -o /dev/null -w '%{http_code}\n' https://options-analytics-web.fly.dev/healthz # 200
+
+# And serve with them.
+curl -s -u you:PASSWORD https://options-analytics-web.fly.dev/api/health | jq
+```
+
+The last call should show `"snapshot_scheduler": true` and the scheduled time.
+If it shows `false`, the daily job is not running and no history is
+accumulating — which you would otherwise not notice for weeks, when IV rank
+never arrives.
+
+---
+
+## The daily snapshot
+
+Runs inside the API process at `OPTIONS_SNAPSHOT_AT` (21:15 UTC by default),
+weekdays only — after the US equity close in both EST and EDT, so the chain
+captured is the settled one rather than a mid-session reading whose volatility
+depends on what time the job happened to fire.
+
+**On start it catches up.** If the machine was down through the scheduled time
+and today has no snapshot, it runs immediately. This is the equivalent of
+systemd's `Persistent=true`, and it matters because **a missed day is a
+permanent hole** — historical implied volatility is not purchasable from any
+free source and cannot be backfilled.
+
+`min_machines_running = 1` and no auto-stop on the API app for the same reason:
+a machine that suspends overnight misses the snapshot.
+
+```bash
+fly logs -a options-analytics-api                       # watch it run
+fly ssh console -a options-analytics-api -C "python -m options_tool snapshot"  # force one
+```
+
+Running it by hand while the scheduler also fires is safe — the database
+constraints make a snapshot idempotent per (ticker, date, expiry, strike, right).
+
+---
 
 ## Backups
 
-Only the volume matters. Everything else is rebuildable from git.
+Only the volume matters; everything else is rebuildable from git.
 
 ```bash
-docker run --rm -v options-analytics_options-data:/data -v "$PWD":/backup alpine \
-  tar czf /backup/options-history-$(date +%F).tar.gz -C /data .
+fly ssh console -a options-analytics-api -C "python -m options_tool export --what daily --out /tmp/history.csv"
+fly ssh sftp get /tmp/history.csv -a options-analytics-api
 ```
 
-Worth putting on its own weekly timer. The database is small — a year of daily
-snapshots for a handful of tickers is tens of megabytes — and it is the only
-thing here that cannot be recreated.
+Fly also snapshots volumes daily (`snapshot_retention = 30` in `fly.api.toml`):
+
+```bash
+fly volumes snapshots list <volume-id>
+```
+
+---
 
 ## Upgrading
 
 ```bash
-cd /opt/options-analytics
 git pull
-docker compose run --rm api alembic upgrade head   # before starting new code
-docker compose build
-docker compose up -d
+fly deploy -c fly.api.toml      # migrations run at startup, before serving
+fly deploy -c fly.web.toml
 ```
 
-Run the migration before the new containers start, so the schema is never behind
-the code reading it.
+No separate migrate step: the API applies Alembic migrations in its own startup
+before accepting traffic. It also *adopts* a schema that was created by the CLI
+rather than failing on it — a database with the tables but no `alembic_version`
+row gets stamped instead of re-created.
+
+---
+
+## Running it on a plain VPS instead
+
+`docker-compose.yml` mirrors the same topology — API unpublished, web published,
+proxy in between — so it behaves the same way.
+
+```bash
+cp .env.example .env     # set APP_USERNAME / APP_PASSWORD
+docker compose up -d --build
+```
+
+Put nginx in front for TLS using `deploy/nginx.conf` (it proxies to the web app
+on :3000; the `/api/` block there is now unnecessary, since the web app proxies
+internally). `deploy/options-snapshot.{service,timer}` are kept for a setup that
+would rather schedule externally than use the in-process scheduler — set
+`OPTIONS_SNAPSHOT_ENABLED=false` if you use them, so the job does not run twice.
+
+---
 
 ## Troubleshooting
 
 | Symptom | Cause |
 |---|---|
-| Pages load, all data empty | `PUBLIC_API_URL` wrong, or set after the web image was built. Rebuild the web image. |
-| `provider_rate_limited` in the UI | Yahoo is throttling. It clears within minutes; the source is unofficial and has no SLA. |
-| IV rank says "insufficient history" | Working as designed. It needs `OPTIONS_MIN_HISTORY_DAYS` (default 20) stored days. |
-| Timer never fires | `systemctl list-timers`; check the unit is enabled and the host clock is in UTC. |
-| Snapshot writes nothing | `journalctl -u options-snapshot.service`. A ticker failing does not abort the rest of the run, so check per-symbol warnings. |
+| Pages load, every panel empty | The web app cannot reach the API. Check `API_INTERNAL_URL` and that the API app is running: `fly status -a options-analytics-api`. |
+| `502 api_unreachable` from `/api/...` | Same. The proxy returns the API's own error shape, so it looks like an API error but is a connectivity one. |
+| Browser keeps asking for credentials | `APP_USERNAME`/`APP_PASSWORD` differ from what you are typing. `fly secrets list` shows names, not values — reset it. |
+| Fly health check failing on web | `/healthz` must be reachable without auth. Check the `matcher` in `middleware.ts` still excludes it. |
+| `provider_rate_limited` | Yahoo is throttling. It clears within minutes; the source is unofficial and has no SLA. |
+| IV rank stuck on "insufficient history" | Working as designed until `OPTIONS_MIN_HISTORY_DAYS` (20) days are stored. Check `/api/health` shows `snapshot_scheduler: true`. |
+| History stopped growing | The API machine is suspending. It needs `min_machines_running = 1` and no auto-stop, because it owns the timer. |

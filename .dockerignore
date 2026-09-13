@@ -1,0 +1,48 @@
+# Everything the image does not need. Without this the build context includes
+# api/.venv and web/node_modules — hundreds of megabytes uploaded to the builder
+# on every build, and worse, a host-built .venv containing macOS binaries can
+# shadow the Linux one installed inside the image.
+
+.git
+.github
+.gitignore
+.dockerignore
+
+# Python
+**/.venv
+**/venv
+**/__pycache__
+**/*.py[cod]
+**/.pytest_cache
+**/.mypy_cache
+**/.ruff_cache
+**/.coverage
+**/coverage.xml
+**/htmlcov
+**/*.egg-info
+
+# Node
+**/node_modules
+**/.next
+**/out
+**/dist
+**/build
+**/*.tsbuildinfo
+
+# Local state — never bake a developer's database into an image
+**/.env
+**/*.db
+**/*.sqlite
+**/*.sqlite3
+data/
+
+# Docs and images
+docs/
+deploy/
+*.md
+!README.md
+
+# OS / editor
+**/.DS_Store
+**/.idea
+**/.vscode

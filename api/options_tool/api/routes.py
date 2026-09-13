@@ -8,6 +8,7 @@ drifting apart.
 
 from __future__ import annotations
 
+import logging
 from datetime import date
 from typing import Annotated, Any
 
@@ -51,6 +52,8 @@ from options_tool.db.snapshot import snapshot_ticker
 from options_tool.providers.base import MarketDataProvider
 from options_tool.providers.rates import resolve_risk_free_rate
 
+logger = logging.getLogger(__name__)
+
 router = APIRouter()
 
 # Annotated dependencies rather than `= Depends(...)` defaults: the call then
@@ -66,22 +69,45 @@ SettingsDep = Annotated[Settings, Depends(get_api_settings)]
 # --------------------------------------------------------------------------
 
 
+@router.get("/live", tags=["meta"], summary="Liveness — is the process up?")
+def live() -> dict[str, str]:
+    """Cheap and dependency-free, for a platform restart check.
+
+    Deliberately separate from /health: a readiness probe that touches the
+    database will restart a container for a *storage* problem that restarting
+    cannot fix, turning a degraded service into a crash loop.
+    """
+    return {"status": "alive"}
+
+
 @router.get("/health", response_model=HealthResponse, tags=["meta"])
 def health(session: SessionDep, provider: ProviderDep) -> HealthResponse:
-    """Liveness plus the two things that actually break: the DB and the provider."""
+    """Readiness: can this instance actually serve?
+
+    Reports the things that genuinely break — the database and which provider is
+    configured — and whether the snapshot scheduler is running, so a deployment
+    that silently stopped accumulating history is visible rather than something
+    you notice weeks later when IV rank never arrives.
+    """
     from sqlalchemy import text  # noqa: PLC0415
+
+    from options_tool.config import get_settings  # noqa: PLC0415
 
     try:
         session.execute(text("SELECT 1"))
         database_reachable = True
-    except Exception:  # noqa: BLE001 -- health must report failure, not raise it
+    except Exception:
+        logger.exception("health check could not reach the database")
         database_reachable = False
 
+    settings = get_settings()
     return HealthResponse(
-        status="ok",
+        status="ok" if database_reachable else "degraded",
         version=__version__,
         provider=provider.name,
         database_reachable=database_reachable,
+        snapshot_scheduler=settings.options_snapshot_enabled,
+        snapshot_at=settings.options_snapshot_at if settings.options_snapshot_enabled else None,
     )
 
 

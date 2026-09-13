@@ -143,8 +143,6 @@ jobs:
 
       - name: Build
         run: npm run build
-        env:
-          NEXT_PUBLIC_API_BASE_URL: http://localhost:8000
 
   # The development machine has no Docker, so the images would otherwise ship
   # written but never built. Building them here is the difference between
@@ -170,18 +168,22 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      - name: The API image must serve a healthy /health
+      - name: The API image must start, migrate and serve
         run: |
           docker run -d --name api -p 8000:8000 \
             -e OPTIONS_PROVIDER=fixture \
             -e OPTIONS_DATABASE_URL=sqlite:////data/options.db \
             options-analytics-api:ci
           for _ in $(seq 1 30); do
-            if curl -fs localhost:8000/health > /dev/null; then break; fi
+            if curl -fs localhost:8000/live > /dev/null; then break; fi
             sleep 2
           done
+          curl -fs localhost:8000/live
           curl -fs localhost:8000/health | tee health.json
           grep -q '"database_reachable":true' health.json
+          # Migrations run at startup against an empty volume, so the schema
+          # must be at head without any separate migrate step.
+          docker exec api python -c "import sqlite3;print(sqlite3.connect('/data/options.db').execute('select * from alembic_version').fetchone())" | grep -q .
           docker rm -f api
 
       - name: The snapshot command must be idempotent inside the container
@@ -210,9 +212,32 @@ jobs:
           push: false
           load: true
           tags: options-analytics-web:ci
-          build-args: NEXT_PUBLIC_API_BASE_URL=http://localhost:8000
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      # Basic auth is the entire authentication story for the deployed app: the
+      # API has no public address, so if this middleware is wrong nothing else
+      # catches it. Verified against the real image, not just in unit tests.
+      - name: The web image must enforce Basic auth
+        if: needs.detect.outputs.web == 'true'
+        run: |
+          docker run -d --name web -p 3000:3000 \
+            -e APP_USERNAME=ci -e APP_PASSWORD=secret \
+            -e API_INTERNAL_URL=http://127.0.0.1:8000 \
+            options-analytics-web:ci
+          for _ in $(seq 1 30); do
+            if curl -fs localhost:3000/healthz > /dev/null; then break; fi
+            sleep 2
+          done
+          # /healthz must be reachable without credentials, or the platform
+          # health check fails and Fly kills a perfectly healthy machine.
+          test "$(curl -s -o /dev/null -w '%{http_code}' localhost:3000/healthz)" = "200"
+          # Everything else must not be.
+          test "$(curl -s -o /dev/null -w '%{http_code}' localhost:3000/)" = "401"
+          test "$(curl -s -o /dev/null -w '%{http_code}' localhost:3000/api/watchlist)" = "401"
+          test "$(curl -s -o /dev/null -w '%{http_code}' -u ci:wrong localhost:3000/)" = "401"
+          test "$(curl -s -o /dev/null -w '%{http_code}' -u ci:secret localhost:3000/)" = "200"
+          docker rm -f web
 
       - name: Validate the compose file
         run: docker compose config --quiet
