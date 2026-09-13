@@ -20,6 +20,8 @@ from options_tool.providers.base import OptionChain, OptionQuote
 
 __all__ = [
     "CHAIN_COLUMNS",
+    "MARKET_TZ",
+    "market_date",
     "ChainStats",
     "build_chain_frame",
     "time_to_expiry",
@@ -28,8 +30,24 @@ __all__ = [
 
 # US equity options stop trading at 16:00 New York time on the expiry date.
 _MARKET_CLOSE = (16, 0)
-_MARKET_TZ = ZoneInfo("America/New_York")
+MARKET_TZ = ZoneInfo("America/New_York")
 _SECONDS_PER_YEAR = 365.0 * 24 * 60 * 60
+
+
+def market_date(moment: datetime | None = None) -> date:
+    """The US trading date a moment belongs to.
+
+    Deliberately *not* the UTC date. Snapshots are keyed by day, and after 20:00
+    Eastern the UTC date has already rolled over -- so a job run at 15:00 and a
+    retry at 20:30 on the same trading afternoon would be filed under two
+    different dates and stored as two rows, defeating the idempotency guarantee
+    in precisely the situation a cron timer creates.
+    """
+    moment = moment or datetime.now(UTC)
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=UTC)
+    return moment.astimezone(MARKET_TZ).date()
+
 
 CHAIN_COLUMNS: dict[str, str] = {
     "ticker": "string",
@@ -76,7 +94,7 @@ def time_to_expiry(expiry: date, as_of: datetime | None = None) -> float:
     as_of = as_of or datetime.now(UTC)
     if as_of.tzinfo is None:
         as_of = as_of.replace(tzinfo=UTC)
-    close = datetime(expiry.year, expiry.month, expiry.day, *_MARKET_CLOSE, tzinfo=_MARKET_TZ)
+    close = datetime(expiry.year, expiry.month, expiry.day, *_MARKET_CLOSE, tzinfo=MARKET_TZ)
     return max((close - as_of).total_seconds() / _SECONDS_PER_YEAR, 0.0)
 
 

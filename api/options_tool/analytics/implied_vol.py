@@ -41,9 +41,17 @@ MIN_VEGA = 1e-8
 SIGMA_TOLERANCE = 1e-9
 
 
-def _price_tolerance(target_price: float) -> float:
-    """Scale the price tolerance to the quote, with a floor at float64 noise."""
-    return max(abs(target_price) * 1e-10, 1e-13)
+def _price_tolerance(target_price: float, intrinsic: float) -> float:
+    """Scale the price tolerance to the option's *time value*, not its price.
+
+    Only the extrinsic part of a premium carries information about volatility.
+    A deep in-the-money put worth $59.36 can have four cents of a millionth in
+    time value; a tolerance scaled to $59.36 is then far looser than the entire
+    informative signal, and the solver stops with sigma wrong in the fourth
+    decimal while reporting a price match. Scaling to the extrinsic value fixes
+    that; the floor keeps the target above float64 noise.
+    """
+    return max((target_price - intrinsic) * 1e-8, 1e-14)
 
 
 class IVStatus(StrEnum):
@@ -154,7 +162,7 @@ def solve_implied_vol(
     if target_price >= upper - PRICE_TOLERANCE:
         return IVResult(None, IVStatus.ABOVE_MAX)
 
-    tolerance = _price_tolerance(target_price)
+    tolerance = _price_tolerance(target_price, lower)
 
     def error_at(sigma: float) -> float:
         return price(S, K, T, r, sigma, q, right) - target_price
@@ -192,9 +200,15 @@ def _newton(
         if vega < MIN_VEGA:
             return None
 
-        sigma -= err / vega
+        step = err / vega
+        sigma -= step
         if not math.isfinite(sigma) or sigma <= MIN_SIGMA or sigma >= MAX_SIGMA:
             return None
+        # Converged in the variable rather than the residual. On a contract whose
+        # price is nearly flat in sigma, the residual target can be below float64
+        # resolution and unreachable, but the iteration has still stopped moving.
+        if abs(step) < SIGMA_TOLERANCE:
+            return sigma, iteration
 
     return None
 

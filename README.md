@@ -1,5 +1,10 @@
 # Options & Markets Analytics
 
+[![CI](https://github.com/Tejas12972/stockwatchlist/actions/workflows/ci.yml/badge.svg)](https://github.com/Tejas12972/stockwatchlist/actions/workflows/ci.yml)
+[![coverage](https://img.shields.io/badge/analytics%20coverage-96%25-brightgreen)](#tests)
+[![python](https://img.shields.io/badge/python-3.11%20%7C%203.12-blue)](https://www.python.org/)
+[![license](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
+
 A personal options-analytics tool. Option chains with **Black-Scholes greeks and
 implied volatility computed locally**, and an IV-rank history the tool builds
 itself by snapshotting chains daily.
@@ -41,8 +46,8 @@ rather than rendering a misleading zero.
 | M1 — core analytics (pricing, greeks, IV solver, chain normalisation, CLI) | done |
 | M2 — persistence + daily snapshots + IV rank | done |
 | M3 — FastAPI | done |
-| M4 — tests + CI | in progress |
-| M5 — Next.js front end | planned |
+| M4 — tests + CI | done |
+| M5 — Next.js front end | in progress |
 | M6 — Docker + Linux deploy | planned |
 | M7 — polish (earnings flag, screener, CSV export) | planned |
 
@@ -231,6 +236,55 @@ spanning 1e-4 to 5.0 volatility and 0.0001 to 2 years, round-trip error is under
 
 Strikes that fail are kept in the table, greyed out and labelled. A strike that
 cannot be priced is information, so it is shown rather than dropped.
+
+---
+
+## Tests
+
+459 tests. **The suite runs with no network at all**, which is enforced rather
+than intended: `pytest-socket` is configured with `--disable-socket`, so any
+accidental outbound call fails the test that made it. `tests/test_offline.py`
+asserts the block is actually in place, so the guarantee cannot rot quietly if
+someone edits the config.
+
+```bash
+cd api
+.venv/bin/pytest                      # offline; sockets are blocked
+.venv/bin/pytest --cov=options_tool   # with coverage
+.venv/bin/pytest -m network           # opt in to live-vendor tests
+.venv/bin/ruff check . && .venv/bin/mypy options_tool
+```
+
+| Module | Coverage |
+|---|---|
+| `analytics/` (pricing, IV, IV rank, payoff) | **96%** |
+| whole package | 94% |
+
+CI enforces ≥85% overall and ≥90% on `analytics/` — a gate, not a number typed
+into a README.
+
+What the suite actually checks, beyond line coverage:
+
+- **Greeks two independent ways** — against published reference values, *and*
+  against finite differences of this project's own pricer. A formula can match a
+  textbook while being wired to the wrong function; a greek can match finite
+  differences while being the wrong formula. Both together leave little room.
+- **Put-call parity** across spots, maturities and dividend yields.
+- **IV round-trips** over the whole surface: σ from 1e-4 to 5, T from 1e-4 to 2
+  years, both rights, including the wings where Newton hands off to bisection.
+- **Every solver edge case returns `None`** with a named reason — expired, zero
+  bid, below intrinsic, above the no-arbitrage maximum, non-finite input.
+- **Snapshot idempotency**, checked from both ends: that re-running holds the row
+  count, and that the database rejects a duplicate even with the upsert bypassed.
+- **The market date, not the UTC date** — a job run at 20:30 Eastern must file
+  under the same trading day as one at 15:00.
+- **Payoff against hand-computed values** for eleven structures, plus a golden
+  file shared with the TypeScript suite so the two implementations cannot drift.
+- **No vendor greek can cross the provider boundary** — asserted structurally by
+  checking `OptionQuote` has no field one could be stored in.
+- **The vendor's failure modes**, against a fake `yfinance`: throttling is
+  retried and reported as retryable, a schema change fails fast, NaN becomes
+  `None`, and a strike-less row is dropped.
 
 ---
 

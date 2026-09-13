@@ -29,7 +29,7 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session
 
 from options_tool.analytics.atm_iv import atm_iv_for_expiry, constant_maturity_atm_iv
-from options_tool.analytics.chain import build_chain_frame
+from options_tool.analytics.chain import build_chain_frame, market_date
 from options_tool.db.models import Contract, Snapshot, Ticker
 from options_tool.providers.base import MarketDataProvider, ProviderError
 
@@ -84,7 +84,7 @@ def snapshot_ticker(
 ) -> SnapshotResult:
     """Capture one ticker's chains for one day. Safe to run more than once a day."""
     as_of = as_of or datetime.now(UTC)
-    snapshot_date = as_of.date()
+    snapshot_date = market_date(as_of)
     result = SnapshotResult(ticker=symbol.upper(), snapshot_date=snapshot_date)
 
     ticker = get_or_create_ticker(session, symbol)
@@ -292,9 +292,7 @@ def snapshot_watchlist(
             )
         except ProviderError as exc:
             logger.error("%s: snapshot failed (%s)", symbol, exc)
-            failed = SnapshotResult(
-                ticker=symbol, snapshot_date=(as_of or datetime.now(UTC)).date()
-            )
+            failed = SnapshotResult(ticker=symbol, snapshot_date=market_date(as_of))
             failed.errors.append(str(exc))
             results.append(failed)
     return results

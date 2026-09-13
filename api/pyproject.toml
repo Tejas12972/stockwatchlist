@@ -51,6 +51,12 @@ packages = ["options_tool"]
 testpaths = ["tests"]
 addopts = [
     "--disable-socket",
+    # AF_UNIX is local IPC, not network access. asyncio builds its event-loop
+    # self-pipe from socket.socketpair(), so without this every test that
+    # touches the FastAPI TestClient dies before it starts. Outbound AF_INET
+    # remains blocked, which is the guarantee that actually matters -- and
+    # tests/test_offline.py asserts it rather than trusting this comment.
+    "--allow-unix-socket",
     "-m", "not network",
     "--strict-markers",
 ]
@@ -86,7 +92,18 @@ ignore = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
-"tests/*" = ["ARG001"]
+# Test idioms, not smells:
+#   ARG001/ARG002 -- a pytest fixture is often requested for its side effect
+#     (the `settings` fixture sets environment variables), so the parameter is
+#     genuinely unused by name.
+#   PLC0415 -- importing inside a test keeps the import under the assertion that
+#     depends on it, and lets a test prove something about import behaviour.
+#   RUF012 -- parametrisation tables held as plain class attributes read far
+#     better than ClassVar-annotated ones.
+"tests/*" = ["ARG001", "ARG002", "PLC0415", "RUF012"]
+# Alembic writes these; hand-wrapping them only loses the next autogenerate.
+"alembic/versions/*" = ["E501"]
+"alembic/env.py" = ["ERA001"]
 # Each early return in the solver is one documented, separately-named failure
 # mode. Collapsing them into fewer exits would hide exactly what section 4 of
 # SPEC.md asks to be made explicit.
