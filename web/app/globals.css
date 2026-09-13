@@ -1,0 +1,16 @@
+@import "tailwindcss";
+
+
+:root {
+  color-scheme: dark;
+}
+
+body {
+  @apply bg-slate-950 text-slate-200 antialiased;
+}
+
+/* Tabular figures everywhere numbers are compared down a column. Proportional
+   digits make a strike ladder impossible to scan. */
+.tnum {
+  font-variant-numeric: tabular-nums;
+}

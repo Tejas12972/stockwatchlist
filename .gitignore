@@ -33,3 +33,8 @@ data/
 .DS_Store
 .idea/
 .vscode/
+
+# Next.js
+.next/
+out/
+next-env.d.ts
