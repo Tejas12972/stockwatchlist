@@ -1,0 +1,110 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "options-tool"
+version = "0.1.0"
+description = "Personal options analytics: self-computed Black-Scholes greeks, implied vol, and an IV history built from daily snapshots."
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "Karthik Tejas Basavarajappa" }]
+dependencies = [
+    "numpy>=1.26",
+    "pandas>=2.1",
+    "sqlalchemy>=2.0",
+    "alembic>=1.13",
+    "pydantic>=2.6",
+    "pydantic-settings>=2.2",
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.27",
+    "yfinance>=0.2.40",
+    "rich>=13.7",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-cov>=4.1",
+    "pytest-socket>=0.7",
+    "httpx>=0.27",
+    "ruff>=0.4",
+    "mypy>=1.9",
+    "pandas-stubs>=2.1",
+    "types-requests>=2.31",
+]
+
+[project.scripts]
+options-tool = "options_tool.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["options_tool"]
+
+# ---------------------------------------------------------------------------
+# Tests
+#
+# --disable-socket is the point: the suite is not merely "intended" to run
+# offline, any accidental network call fails the test. Live-data tests opt back
+# in with @pytest.mark.network and are deselected by default.
+# ---------------------------------------------------------------------------
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = [
+    "--disable-socket",
+    "-m", "not network",
+    "--strict-markers",
+]
+markers = [
+    "network: hits a live market-data vendor; deselected by default",
+]
+filterwarnings = ["error::DeprecationWarning:options_tool.*"]
+
+[tool.coverage.run]
+source = ["options_tool"]
+branch = true
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+    "@abstractmethod",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "N", "UP", "B", "C4", "SIM", "RET", "ARG", "PTH", "RUF", "PL", "BLE"]
+ignore = [
+    "N803", "N806",  # single-capital maths names: S, K, T, N(d1)
+    "RUF022",        # __all__ is grouped by meaning, not alphabetised
+    "PLR0913",       # Black-Scholes genuinely takes S, K, T, r, sigma, q, right
+    "PLR0917",       # ...and (S, K, T, r, sigma, q, right) is the conventional order
+    "PLR2004",       # numeric tolerances read better inline than as constants
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["ARG001"]
+# Each early return in the solver is one documented, separately-named failure
+# mode. Collapsing them into fewer exits would hide exactly what section 4 of
+# SPEC.md asks to be made explicit.
+"options_tool/analytics/implied_vol.py" = ["PLR0911"]
+
+[tool.mypy]
+python_version = "3.11"
+warn_unused_configs = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+no_implicit_optional = true
+disallow_untyped_defs = true
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "options_tool.analytics.*"
+strict = true
+
+[[tool.mypy.overrides]]
+module = ["yfinance.*", "pandas.*"]
+ignore_missing_imports = true
