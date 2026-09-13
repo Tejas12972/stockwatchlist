@@ -1,0 +1,58 @@
+# syntax=docker/dockerfile:1
+
+# ---- builder ---------------------------------------------------------------
+# Wheels are built in a stage that carries a compiler, so the runtime image does
+# not have to ship one. numpy and pandas both need it on architectures without
+# prebuilt wheels.
+FROM python:3.11-slim AS builder
+
+ENV PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PIP_NO_CACHE_DIR=1
+
+RUN apt-get update \
+    && apt-get install --no-install-recommends -y build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+COPY api/pyproject.toml ./
+COPY api/options_tool ./options_tool
+
+RUN python -m venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+RUN pip install --no-cache-dir .
+
+# ---- runtime ---------------------------------------------------------------
+FROM python:3.11-slim AS runtime
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PATH="/opt/venv/bin:$PATH"
+
+# Never run as root. The snapshot job writes to /data, so that is the only path
+# this user needs to own.
+RUN useradd --create-home --uid 10001 options
+
+COPY --from=builder /opt/venv /opt/venv
+
+WORKDIR /app
+COPY api/options_tool ./options_tool
+COPY api/alembic ./alembic
+COPY api/alembic.ini ./
+COPY api/tests/fixtures ./tests/fixtures
+
+RUN mkdir -p /data && chown -R options:options /data /app
+USER options
+
+ENV OPTIONS_DATABASE_URL=sqlite:////data/options.db
+VOLUME ["/data"]
+EXPOSE 8000
+
+# Checks /live, not /health. A container health check answers "should this be
+# restarted", and restarting cannot fix an unreachable database -- pointing it
+# at the readiness endpoint would turn a degraded service into a crash loop.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+    CMD python -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/live', timeout=4).status == 200 else 1)"
+
+# Overridden in fly.api.toml to bind :: instead, because Fly's private network
+# is IPv6-only.
+CMD ["uvicorn", "options_tool.api.main:app", "--host", "0.0.0.0", "--port", "8000"]

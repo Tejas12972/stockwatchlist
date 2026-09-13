@@ -1,0 +1,22 @@
+[Unit]
+Description=Daily options chain snapshot
+Documentation=https://github.com/Tejas12972/stockwatchlist
+
+[Timer]
+# 21:15 UTC is 17:15 New York during EDT and 16:15 during EST — after the US
+# equity close either way, so the chain captured is the settled one rather than
+# a mid-session snapshot that would make the IV series depend on what time the
+# job happened to run.
+OnCalendar=Mon..Fri 21:15 UTC
+
+# If the host was asleep or rebooted through the scheduled time, run on the next
+# boot instead of skipping the day. A missing day is a permanent gap in the IV
+# history — it cannot be backfilled from any free source.
+Persistent=true
+
+# Spread the load off the exact minute; every scraper firing at 21:15:00 is
+# precisely when the vendor throttles.
+RandomizedDelaySec=10min
+
+[Install]
+WantedBy=timers.target

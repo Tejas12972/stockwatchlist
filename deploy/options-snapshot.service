@@ -1,0 +1,29 @@
+[Unit]
+Description=Capture today's option chains into the local IV history
+Documentation=https://github.com/Tejas12972/stockwatchlist
+After=docker.service network-online.target
+Requires=docker.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/options-analytics
+
+# Runs the snapshot in a throwaway container against the same named volume the
+# API uses. The command is idempotent: if the timer fires twice, or a failed run
+# is retried, the day is refreshed in place rather than duplicated.
+ExecStart=/usr/bin/docker compose run --rm snapshot
+
+# The unofficial data source throttles. Retry a few times with a real gap
+# between attempts rather than losing the day.
+Restart=on-failure
+RestartSec=15min
+
+# The history is worth more than any single day's freshness, so a failure is
+# logged loudly rather than silently swallowed.
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=options-snapshot
+
+[Install]
+WantedBy=multi-user.target

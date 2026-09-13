@@ -1,0 +1,74 @@
+# Local and single-host deployment.
+#
+#   cp .env.example .env
+#   docker compose up --build
+#
+# Mirrors the Fly topology: the API is **not** published to the host, the web
+# app is, and the browser reaches the API only through the web app's server-side
+# proxy. That means CORS never applies and the API is not directly reachable —
+# the same properties the deployed version relies on, so testing here tests the
+# real arrangement rather than a friendlier one.
+
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    image: options-analytics-api
+    restart: unless-stopped
+    environment:
+      OPTIONS_PROVIDER: ${OPTIONS_PROVIDER:-yfinance}
+      OPTIONS_DATABASE_URL: sqlite:////data/options.db
+      OPTIONS_RISK_FREE_RATE: ${OPTIONS_RISK_FREE_RATE:-0.04}
+      OPTIONS_DIVIDEND_YIELD: ${OPTIONS_DIVIDEND_YIELD:-0.0}
+      OPTIONS_MIN_HISTORY_DAYS: ${OPTIONS_MIN_HISTORY_DAYS:-20}
+      OPTIONS_IV_WINDOW_DAYS: ${OPTIONS_IV_WINDOW_DAYS:-252}
+      OPTIONS_LOG_FORMAT: ${OPTIONS_LOG_FORMAT:-text}
+      # The daily snapshot runs inside this process — see options_tool/scheduler.py
+      # for why it is not a separate container.
+      OPTIONS_SNAPSHOT_ENABLED: ${OPTIONS_SNAPSHOT_ENABLED:-true}
+      OPTIONS_SNAPSHOT_AT: ${OPTIONS_SNAPSHOT_AT:-21:15}
+    volumes:
+      # The accumulated IV history is the only irreplaceable state here. A named
+      # volume so `docker compose down` does not destroy it.
+      - options-data:/data
+    # Deliberately no `ports`. Reachable only on the compose network, as `api`.
+    expose:
+      - "8000"
+
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile.web
+    image: options-analytics-web
+    restart: unless-stopped
+    depends_on:
+      api:
+        condition: service_healthy
+    environment:
+      API_INTERNAL_URL: http://api:8000
+      # Unset locally = no auth, which is what you want on localhost. Set both
+      # to require a login. On Fly these are secrets, never environment values.
+      APP_USERNAME: ${APP_USERNAME:-}
+      APP_PASSWORD: ${APP_PASSWORD:-}
+    ports:
+      - "${WEB_PORT:-3000}:3000"
+
+  # One-off snapshot, for seeding history or testing idempotency by hand:
+  #   docker compose run --rm snapshot
+  # Not started by `up` — the API schedules itself.
+  snapshot:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    image: options-analytics-api
+    profiles: ["tools"]
+    environment:
+      OPTIONS_PROVIDER: ${OPTIONS_PROVIDER:-yfinance}
+      OPTIONS_DATABASE_URL: sqlite:////data/options.db
+    volumes:
+      - options-data:/data
+    command: ["python", "-m", "options_tool", "snapshot"]
+
+volumes:
+  options-data:
