@@ -513,25 +513,6 @@ dividend payers and will bias their greeks.
 
 **Time to expiry is calendar time**, measured to the 16:00 New York close, not
 trading time. Weekend decay is therefore priced as if it were trading decay.
-
----
-
-## What I would do differently
-
-**Black-Scholes is the wrong model for American options**, and I used it anyway
-because it is the one an interviewer will ask me to derive. A binomial or
-Bjerksund-Stensland model would price early exercise properly; the provider
-abstraction means swapping the pricer is contained, and it is the first thing I
-would add.
-
-**A constant dividend yield of zero is wrong for dividend payers.** Discrete
-dividends would be more work and materially more correct for the names where it
-matters — pre-ex-dividend calls especially.
-
-**SQLite will hold for years at this scale** — a handful of tickers, one snapshot
-a day — and I chose it deliberately over Postgres because zero operations beats
-scalability I do not need. It would need replacing for multiple users.
-
 ---
 
 ## License
